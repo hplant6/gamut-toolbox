@@ -6,6 +6,21 @@ the strongest features are the ones that need all three.
 
 ---
 
+## 🧹 Small TODOs
+
+- [ ] **Extract has no "Meet the tools" description.** `src/tools.js` gives Extract (`Alt+E`)
+      no `desc`, so it's missing from the onboarding tour. Add one along the lines of:
+      "Pull or download elements from the working window: their content, images and media."
+      *(noted 2026-09-26)*
+- [ ] **README tool list is stale.** It still lists Resize (now Move) and bare-key shortcuts
+      (they're `Alt+key`), and leaves out Sliders, Design drift and Export. *(noted 2026-09-26)*
+- [ ] **Storybook block still says "Gamut Terminal".** The managed `## Design System (Storybook)`
+      block that `storybookBlock()` in main.js writes into CLAUDE.md / AGENTS.md / GEMINI.md reads
+      "set in your environment by Gamut Terminal". Update the template to "Gamut Toolbox".
+      *(noted 2026-09-26)*
+
+---
+
 ## 🟢 Speccing now
 
 ### 1. Design-drift scanner
