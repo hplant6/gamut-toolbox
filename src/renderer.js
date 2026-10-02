@@ -8983,6 +8983,21 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   }
   // No panels yet → a made-up panel with random values, so there's always something to
   // preview on the page. Its controls are event-only: they change nothing on the page.
+  // Any CSS colour → [r, g, b, a] (sRGB bytes, alpha 0..1) by painting one pixel; null
+  // when the browser can't resolve it (a var(), a typo). Canvas ignores unparseable
+  // fillStyles, so two different sentinels tell "unparsed" apart from a real match.
+  const _slCanvas = document.createElement('canvas'); _slCanvas.width = _slCanvas.height = 1;
+  const _slCtx = _slCanvas.getContext('2d', { willReadFrequently: true });
+  function cssRgba(v) {
+    if (!v || typeof v !== 'string' || !_slCtx) return null;
+    _slCtx.fillStyle = '#000000'; _slCtx.fillStyle = v; const a = _slCtx.fillStyle;
+    _slCtx.fillStyle = '#ffffff'; _slCtx.fillStyle = v;
+    if (_slCtx.fillStyle !== a) return null;
+    _slCtx.clearRect(0, 0, 1, 1); _slCtx.fillRect(0, 0, 1, 1);
+    const d = _slCtx.getImageData(0, 0, 1, 1).data;
+    return [d[0], d[1], d[2], Math.round(d[3] / 255 * 100) / 100];
+  }
+  const rgbaString = ([r, g, b, a]) => a >= 1 ? '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('') : `rgba(${r}, ${g}, ${b}, ${a})`;
   function demoPanel() {
     const r = (a, b, st) => +(Math.round((a + Math.random() * (b - a)) / st) * st).toFixed(4);
     const hex = () => '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
@@ -9124,10 +9139,21 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
       sw.type = 'button'; sw.className = 'anim-swatch';
       const hex = document.createElement('input');
       hex.className = 'pp-ctrl-input anim-num sl-hex'; hex.spellcheck = false;
-      set = (v) => { sw.style.background = v; hex.value = v; };
+      // Any CSS colour, shown as written. The picker gets an rgba() it can parse (oklch,
+      // var() etc. resolved by painting) and keeps alpha, so a translucent background
+      // doesn't come back solid.
+      set = (v) => { sw.style.background = v || ''; hex.value = v || ''; hex.title = v || ''; };
       set(v0);
-      sw.addEventListener('click', () => sharedColorPicker && sharedColorPicker.open(sw, cur.values[c.k], (h) => { set(h); setValue(c.k, h, { fromRow: true }); }));
-      hex.addEventListener('change', () => { const h = hex.value.trim().toLowerCase(); if (/^#[0-9a-f]{6}$/.test(h)) { set(h); setValue(c.k, h, { fromRow: true }); } else hex.value = cur.values[c.k]; });
+      sw.addEventListener('click', () => {
+        if (!sharedColorPicker) return;
+        const rgba = cssRgba(cur.values[c.k]);
+        sharedColorPicker.open(sw, rgba ? rgbaString(rgba) : '#ffffff', (h) => { set(h); setValue(c.k, h, { fromRow: true }); }, { alpha: true });
+      });
+      hex.addEventListener('change', () => {
+        const h = hex.value.trim();
+        if (h && cssRgba(h)) { const v = /^#[0-9a-f]+$/i.test(h) ? h.toLowerCase() : h; set(v); setValue(c.k, v, { fromRow: true }); }
+        else hex.value = cur.values[c.k] || '';
+      });
       ctrl.append(hex, sw);
     } else if (c.type === 'toggle') {
       const sw = document.createElement('button');
@@ -9222,8 +9248,17 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     $('sl-send').title = demo ? 'Sample values: nothing to send. Ask your agent for a real panel, or use From Page Vars.' : '';
     subEl.textContent = r.noPage ? 'Open a page in the browser to tune it.' : DEFAULT_SUB;
     render(); renderPresets();
-    // Every control, not just the changed ones: the page may still hold another panel's values.
-    push({ ...values });
+    // Only what differs from the code. The page already renders every def, so pushing
+    // them all rewrote the page with the panel's copy of each value — for colours that
+    // copy was lossy (non-hex → #ffffff), which is what blanked page backgrounds.
+    // (Another panel's leftovers are already cleared: main restores on switch.)
+    const diff = {};
+    for (const c of r.panel.controls) {
+      if (!c.k || c.type === 'button' || !(c.k in values)) continue;
+      const v = values[c.k];
+      if (v !== '' && JSON.stringify(v) !== JSON.stringify(c.def)) diff[c.k] = v;
+    }
+    if (Object.keys(diff).length) push(diff);
   }
   async function open(preferId) {
     panel.hidden = false;

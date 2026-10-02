@@ -87,6 +87,12 @@ function getSlidersRuntime() {
   };
 
   // ── Page variables → a starter panel. Same-origin sheets only (others throw on .cssRules).
+  function paints(v) {
+    var c = document.createElement('canvas').getContext('2d'); if (!c) return false;
+    c.fillStyle = '#000000'; c.fillStyle = v; var a = c.fillStyle;
+    c.fillStyle = '#ffffff'; c.fillStyle = v;
+    return c.fillStyle === a;
+  }
   S.scanVars = function () {
     var found = {}, order = [];
     function walk(rules) {
@@ -112,7 +118,10 @@ function getSlidersRuntime() {
       if (h) {
         var hex = h[1].length === 3 ? h[1].split('').map(function (x) { return x + x; }).join('') : h[1];
         out.push({ name: name, kind: 'color', value: '#' + hex.toLowerCase() });
+        return;
       }
+      // rgb()/hsl()/oklch()/8-digit hex… — kept exactly as written, if the browser paints it.
+      if (/^(#[0-9a-f]{4,8}|(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)[(])/i.test(v) && paints(v)) out.push({ name: name, kind: 'color', value: v });
     });
     return out.slice(0, 60);
   };
@@ -154,6 +163,19 @@ function installOverlay(S) {
     '.ax span{color:var(--faint)}.r .ax input[type=range]{grid-column:auto;width:100%;margin:0;accent-color:var(--ac)}.ax i{font-style:normal;text-align:right;font-variant-numeric:tabular-nums}'
   ].join('\n');
 
+  // Any CSS colour → [r, g, b, a] by painting one pixel (null if unresolvable, e.g. var()).
+  var cc = document.createElement('canvas'); cc.width = cc.height = 1;
+  var cx = cc.getContext('2d');
+  function rgbaOf(v) {
+    if (!v || typeof v !== 'string' || !cx) return null;
+    cx.fillStyle = '#000000'; cx.fillStyle = v; var a = cx.fillStyle;
+    cx.fillStyle = '#ffffff'; cx.fillStyle = v;
+    if (cx.fillStyle !== a) return null;
+    cx.clearRect(0, 0, 1, 1); cx.fillRect(0, 0, 1, 1);
+    var d = cx.getImageData(0, 0, 1, 1).data;
+    return [d[0], d[1], d[2], Math.round(d[3] / 255 * 100) / 100];
+  }
+  function toHex(a) { return '#' + [a[0], a[1], a[2]].map(function (x) { return (x < 16 ? '0' : '') + x.toString(16); }).join(''); }
   function round(v, step) { var d = Math.max(0, -Math.floor(Math.log10(step || 1))); return +(+v).toFixed(Math.min(6, d + 1)); }
   function same(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -230,10 +252,16 @@ function installOverlay(S) {
         });
         set = function (x) { cur = x; vec = x.slice(); x.forEach(function (xv, i) { if (axes[i]) { axes[i][0].value = xv; axes[i][1].textContent = xv; } }); mark(); };
       } else if (c.type === 'color') {
+        // <input type=color> only speaks opaque #rrggbb: show the value resolved to hex,
+        // and keep the current alpha when sending, so rgba()/oklch() backgrounds aren't
+        // flattened (or blacked out by an unparseable value) the moment you touch them.
         var ci = el('input'); ci.type = 'color';
-        ci.addEventListener('input', function () { send(ci.value); });
+        ci.addEventListener('input', function () {
+          var a = rgbaOf(cur), h = ci.value;
+          send(a && a[3] < 1 ? 'rgba(' + parseInt(h.substr(1, 2), 16) + ', ' + parseInt(h.substr(3, 2), 16) + ', ' + parseInt(h.substr(5, 2), 16) + ', ' + a[3] + ')' : h);
+        });
         r.appendChild(ci);
-        set = function (x) { cur = x; ci.value = x; mark(); };
+        set = function (x) { cur = x; var a = rgbaOf(x); ci.value = a ? toHex(a) : '#000000'; ci.title = x || ''; mark(); };
       } else if (c.type === 'toggle') {
         var cb = el('input'); cb.type = 'checkbox';
         cb.addEventListener('change', function () { send(cb.checked); });

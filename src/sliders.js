@@ -8,6 +8,8 @@ const fs = require('fs');
 const path = require('path');
 
 const TYPES = ['range', 'int', 'color', 'toggle', 'select', 'vec2', 'vec3', 'button'];
+// A CSS colour as written in source: hex (3/4/6/8), a colour function, a var(), or a keyword.
+const COLOR_RE = /^(#[0-9a-f]{3,8}|(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\([^;{}]*\)|var\(--[\w-]+[^;{}]*\)|[a-z]+)$/i;
 // Dotted identifiers + numeric indexes only — a path is walked, never evaluated.
 const PATH_RE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[\d+\])*$/;
 const ID_RE = /^[\w.-]{1,80}$/;
@@ -43,7 +45,7 @@ function normalizeControl(raw, i, errors, seen) {
   let type = raw.type;
   if (!type) {
     if (typeof raw.def === 'boolean') type = 'toggle';
-    else if (typeof raw.def === 'string' && raw.def.startsWith('#')) type = 'color';
+    else if (typeof raw.def === 'string' && /^(#|(rgba?|hsla?|oklch|oklab|lab|lch|hwb|color)\()/i.test(raw.def.trim())) type = 'color';
     else if (Array.isArray(raw.def)) type = raw.def.length === 2 ? 'vec2' : 'vec3';
     else if (Array.isArray(raw.options)) type = 'select';
     else type = 'range';
@@ -73,10 +75,14 @@ function normalizeControl(raw, i, errors, seen) {
       if (t.length) c.tokens = Object.fromEntries(t.sort((a, b) => a[1] - b[1]));
     }
   } else if (type === 'color') {
-    const d = String(raw.def || '#ffffff');
-    c.def = /^#[0-9a-f]{3}$/i.test(d) ? '#' + d.slice(1).split('').map(x => x + x).join('') : d;
-    if (!/^#[0-9a-f]{6}$/i.test(c.def)) { errors.push(`"${k}": colour def must be #rrggbb`); c.def = '#ffffff'; }
-    c.def = c.def.toLowerCase();
+    // Kept exactly as the code writes it (rgba/hsl/oklch/var… included). This used to
+    // accept only #rrggbb and swap anything else for #ffffff — which then got painted
+    // over the page's real colour. '' = unknown: shown blank, never sent until picked.
+    const d = String(raw.def == null ? '' : raw.def).trim();
+    if (!d) { errors.push(`"${k}": colour needs a def (the value in the code today)`); c.def = ''; }
+    else if (!COLOR_RE.test(d)) { errors.push(`"${k}": colour def "${d}" is not a CSS colour`); c.def = ''; }
+    else if (/^#[0-9a-f]{3}$/i.test(d)) c.def = ('#' + d.slice(1).split('').map(x => x + x).join('')).toLowerCase();
+    else c.def = d.startsWith('#') ? d.toLowerCase() : d;
   } else if (type === 'toggle') {
     c.def = !!raw.def;
   } else if (type === 'select') {
@@ -218,7 +224,7 @@ function agentLines(projectDir) {
     '] }',
     '```',
     '',
-    '- Types: `range`, `int`, `color` (#rrggbb), `toggle`, `select` (+ `options`), `vec2`, `vec3`, `button`. `def` = the value in the code **today**; `source` = where it lives.',
+    '- Types: `range`, `int`, `color` (any CSS colour — copy `def` exactly as the code writes it, e.g. `rgba(10, 10, 15, 0.8)` or `oklch(0.2 0.01 260)`; never round it to hex), `toggle`, `select` (+ `options`), `vec2`, `vec3`, `button`. `def` = the value in the code **today**; `source` = where it lives.',
     '- Binds, in order of preference: `css` sets a custom property (on `:root` unless `on` names a selector), with no code change. `path` assigns a dotted path from `window`, and calls `.set(...)` when the target has one (three.js vectors/colours). `event` needs a listener: `addEventListener("gamut:slider", e => { const { k, value } = e.detail; … })`.',
     '- `tokens: { "--space-4": 16, … }` on a range snaps it to design-token values.',
     '- When a "Sliders: bake these values" message arrives, write the values into the code and update `def` in the panel file.',
