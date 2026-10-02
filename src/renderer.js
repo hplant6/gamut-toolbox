@@ -816,6 +816,15 @@ let nextId          = 1;
 // The active project's id (from the project switcher). Sessions are tagged
 // with this at creation so the tab strip can filter to one project at a time.
 function currentProjectId() { try { return localStorage.getItem(LS.activeProject) || ''; } catch (_) { return ''; } }
+// The folder a session's agent runs in: its OWN project's rootDir, not whichever
+// project happens to be active when the process starts. Restored tabs, model
+// switches and resets otherwise land in the active project's folder. '' (untagged
+// session / unknown project) lets main fall back to the active project dir.
+function projectDirFor(pid) {
+  if (!pid) return '';
+  try { const p = JSON.parse(localStorage.getItem(LS.projects) || '[]').find(x => x.id === pid); return (p && p.rootDir) || ''; } catch (_) { return ''; }
+}
+function sessionDir(id) { const s = sessions.get(id); return projectDirFor(s && s.projectId); }
 
 function getDefaultProfile() {
   return sessionProfiles[0] || { name: 'Claude Code', command: 'claude' };
@@ -863,7 +872,7 @@ function createSession(name, command, acp, transient, resume, projectId) {
   const pid     = projectId !== undefined ? projectId : currentProjectId();   // tag the session to a project
 
   if (isAcp) {
-    createAcpSession(id, sName, agent, cmd, resume);
+    createAcpSession(id, sName, agent, cmd, resume, pid);
     const cs = sessions.get(id);
     if (cs) { cs.projectId = pid; if (transient) cs.transient = true; }
     saveOpenSessions();
@@ -890,7 +899,7 @@ function createSession(name, command, acp, transient, resume, projectId) {
   });
   ro.observe(termEl);
 
-  ipcRenderer.send(IPC.PTY_SPAWN, { id, command: cmd });
+  ipcRenderer.send(IPC.PTY_SPAWN, { id, command: cmd, cwd: projectDirFor(pid) });
   const sess = { id, name: sName, command: cmd, term, fitAddon, el, termEl, ro, transient: transient === true, projectId: pid };
   sessions.set(id, sess);
   saveOpenSessions();
@@ -902,7 +911,7 @@ function createSession(name, command, acp, transient, resume, projectId) {
 }
 
 
-function createAcpSession(id, name, agent = 'claude', command = 'claude', resume = null) {
+function createAcpSession(id, name, agent = 'claude', command = 'claude', resume = null, projectId = '') {
   const el = document.createElement('div');
   el.className = 'pty-session';
   ptySessionsEl.appendChild(el);
@@ -1018,7 +1027,7 @@ function createAcpSession(id, name, agent = 'claude', command = 'claude', resume
     _replaying: !!(resume && resume.sessionId),   // suppress chimes while history replays
   });
   if (resume && resume.sessionId) statusTextEl.textContent = 'Resuming…';
-  ipcRenderer.send(IPC.ACP_SPAWN, { id, agent, resume: resume || null });
+  ipcRenderer.send(IPC.ACP_SPAWN, { id, agent, resume: resume || null, cwd: projectDirFor(projectId) });
   switchSession(id);
 }
 
@@ -1084,7 +1093,7 @@ function switchAcpView(id, view) {
   if (view === 'term') {
     if (!s._ptySpawned) {
       s._ptySpawned = true;
-      ipcRenderer.send(IPC.PTY_SPAWN, { id, command: s.command || 'claude' });
+      ipcRenderer.send(IPC.PTY_SPAWN, { id, command: s.command || 'claude', cwd: sessionDir(id) });
     }
     refitSession(id, 50);
   }
@@ -1184,14 +1193,14 @@ function selectModel(modelId) {
     acpSetStatus(s, 'connecting');
     s.statusTextEl.textContent = 'Switching model…';
     ipcRenderer.send(IPC.ACP_KILL, { id: activeId });
-    ipcRenderer.send(IPC.ACP_SPAWN, { id: activeId, model: modelId, agent: s.agent });
+    ipcRenderer.send(IPC.ACP_SPAWN, { id: activeId, model: modelId, agent: s.agent, cwd: sessionDir(activeId) });
   } else {
     s.term.clear();
     // Bake the model into s.command (from the pristine base, so flags don't stack
     // across switches) — restart + session-restore then keep the chosen model.
     s._baseCommand = s._baseCommand || s.command;
     s.command = commandWithModel(s._baseCommand, key, modelId);
-    ipcRenderer.send(IPC.PTY_RESTART, { id: activeId, command: s.command });
+    ipcRenderer.send(IPC.PTY_RESTART, { id: activeId, command: s.command, cwd: sessionDir(activeId) });
     saveOpenSessions();
     // PTY has no clean "ready" signal — confirm shortly after relaunch. Capture
     // the toast: a second switch (or tab close) inside the window replaces it,
@@ -1229,10 +1238,10 @@ function clearSession(s) {
     acpSetStatus(s, 'connecting');
     if (s.statusTextEl) s.statusTextEl.textContent = 'Clearing session…';
     ipcRenderer.send(IPC.ACP_KILL, { id: s.id });
-    ipcRenderer.send(IPC.ACP_SPAWN, { id: s.id, model: s.model, agent: s.agent });
+    ipcRenderer.send(IPC.ACP_SPAWN, { id: s.id, model: s.model, agent: s.agent, cwd: sessionDir(s.id) });
   } else {
     s.term.clear();
-    ipcRenderer.send(IPC.PTY_RESTART, { id: s.id, command: s.command });
+    ipcRenderer.send(IPC.PTY_RESTART, { id: s.id, command: s.command, cwd: sessionDir(s.id) });
     const myToast = s._modelToast;
     setTimeout(() => { if (s._modelToast === myToast) finishModelSwitch(s); }, PTY_MODEL_SWITCH_SETTLE_MS);
   }
@@ -5844,7 +5853,7 @@ function reconnectClaudeSessions(message) {
     acpSetStatus(s, 'connecting');
     if (s.statusTextEl) s.statusTextEl.textContent = 'Reconnecting…';
     ipcRenderer.send(IPC.ACP_KILL, { id: s.id });
-    ipcRenderer.send(IPC.ACP_SPAWN, { id: s.id, model: s.model, agent: s.agent });
+    ipcRenderer.send(IPC.ACP_SPAWN, { id: s.id, model: s.model, agent: s.agent, cwd: sessionDir(s.id) });
   });
   showToast(message, { duration: 2600 });
 }
@@ -11850,7 +11859,7 @@ function buildAuditMenu() {
   const ctl = wireModal(modal, { backdropClose: false });
 
   restartBtn.addEventListener('click', () => {
-    if (activeId !== null) ipcRenderer.send(IPC.PTY_RESTART, { id: activeId });
+    if (activeId !== null) ipcRenderer.send(IPC.PTY_RESTART, { id: activeId, cwd: sessionDir(activeId) });
     ctl.close();
   });
 

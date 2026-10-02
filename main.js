@@ -2270,6 +2270,14 @@ function repositionBrowserView(overrideFraction) {
 let currentProjectDir = '';
 function homeDir() { return platform.homeDir(); }
 function sessionCwd() { return currentProjectDir || homeDir(); }
+// Agent processes run in the folder of the project their tab belongs to (the
+// renderer sends it), resolved once up front — not the global active project,
+// read after an await, which put restored/respawned tabs in the wrong repo.
+// Missing/unknown → the active project, as before.
+function spawnCwd(dir) {
+  try { if (dir && typeof dir === 'string' && fs.existsSync(dir)) return dir; } catch (_) {}
+  return sessionCwd();
+}
 ipcMain.on(IPC.SET_PROJECT_DIR, (_, { dir } = {}) => {
   currentProjectDir = dir || '';
   startProjectWatchers(currentProjectDir);
@@ -2425,7 +2433,7 @@ function startProjectWatchers(dir) {
 const DUAL_ENV_BINS = new Set(['codex', 'ollama']);
 const resolveAgentEnv = platform.resolveAgentEnv;
 const winVersion = platform.agentVersion;
-function winCwd() { return platform.agentCwd(sessionCwd(), homeDir()); }
+function winCwd(dir = sessionCwd()) { return platform.agentCwd(dir, homeDir()); }
 
 // ── PTY sessions ──────────────────────────────────────────────────
 function safeKill(proc) { try { proc && proc.kill(); } catch (_) {} }
@@ -2474,7 +2482,8 @@ async function ensureClaudeTrusted(dir) {
   } catch (e) { console.log('[trust] ensureClaudeTrusted failed:', (e && e.message) || e); }
 }
 
-async function spawnPty(id, command = 'claude') {
+async function spawnPty(id, command = 'claude', cwd = '') {
+  const dir = spawnCwd(cwd);
   // Kill-before-spawn: a stray double PTY_SPAWN for a live id (no kill first)
   // would orphan the previous ConPTY — its onData/onExit ownership guards then
   // make it un-killable until app quit. PTY_RESTART already kills first; this
@@ -2486,16 +2495,16 @@ async function spawnPty(id, command = 'claude') {
     const base = command.trim().split(/\s+/)[0].replace(/.*\//, '');
     // Interactive `claude` in the terminal view would otherwise block on the
     // "trust this folder?" prompt — pre-accept trust for the session cwd first.
-    if (base === 'claude') await ensureClaudeTrusted(platform.toWslPath(sessionCwd()));
+    if (base === 'claude') await ensureClaudeTrusted(platform.toWslPath(dir));
     const env  = DUAL_ENV_BINS.has(base) ? await resolveAgentEnv(base) : 'wsl';
-    const sbUrl = storybookUrlFor(sessionCwd());   // this project's Storybook, if running
+    const sbUrl = storybookUrlFor(dir);   // this project's Storybook, if running
     let proc;
     if (env === 'win') {
       // Windows-installed agent (e.g. Codex via Windows npm) → run on Windows.
       const { file, args } = platform.cmdFileArgs(['/c', command]);
       proc = pty.spawn(file, args, {
         name: 'xterm-256color', cols: 80, rows: 24,
-        cwd: winCwd(), env: { ...process.env, ...(sbUrl ? { STORYBOOK_URL: sbUrl } : {}) },
+        cwd: winCwd(dir), env: { ...process.env, ...(sbUrl ? { STORYBOOK_URL: sbUrl } : {}) },
       });
     } else {
       // Prepend the user-local bin dir so pip/pipx/uv-installed tools are found
@@ -2503,7 +2512,7 @@ async function spawnPty(id, command = 'claude') {
       const { file, args } = platform.nixFileArgs(['bash', '-lic', wrappedCmd]);
       proc = pty.spawn(file, args, {
         name: 'xterm-256color', cols: 80, rows: 24,
-        cwd: sessionCwd(),
+        cwd: dir,
         env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       });
     }
@@ -2532,13 +2541,14 @@ ipcMain.on(IPC.PTY_INPUT,   (_, { id, data } = {})  => { const p = ptyProcesses[
 // node-pty throws synchronously if the pty has already exited (e.g. a refit fires
 // after the process ended) — swallow it so it doesn't crash the main process.
 ipcMain.on(IPC.PTY_RESIZE,  (_, { id, cols, rows } = {}) => { const p = ptyProcesses[id]; if (p) { try { p.resize(cols, rows); } catch (_) {} } });
-ipcMain.on(IPC.PTY_SPAWN,   (_, { id, command } = {}) => spawnPty(id, command));
+ipcMain.on(IPC.PTY_SPAWN,   (_, { id, command, cwd } = {}) => spawnPty(id, command, cwd));
 ipcMain.on(IPC.PTY_KILL,    (_, { id } = {})         => {
   killPty(id);
 });
-ipcMain.on(IPC.PTY_RESTART, (_, { id, command } = {}) => {
+ipcMain.on(IPC.PTY_RESTART, (_, { id, command, cwd } = {}) => {
+  const cmd = command || ptyCommands[id] || 'claude';   // read before killPty clears it
   killPty(id);
-  spawnPty(id, command || ptyCommands[id] || 'claude');
+  spawnPty(id, cmd, cwd);
 });
 
 ipcMain.handle(IPC.CHECK_MODEL, (_, { command } = {}) => {
@@ -2737,7 +2747,7 @@ async function ensureClaudeAdapter(id) {
   return true;
 }
 
-async function launchClaudeAcp(modelOverride) {
+async function launchClaudeAcp(modelOverride, dir = sessionCwd()) {
   // Run the adapter WSL-side (Windows) / natively (POSIX), where Claude Code uses
   // its own ~/.claude subscription creds. We used to run the *Windows*-side adapter
   // pointed at WSL's ~/.claude via a UNC path, but its bundled claude.exe is a Bun
@@ -2751,7 +2761,7 @@ async function launchClaudeAcp(modelOverride) {
   let model = '';
   try { model = JSON.parse(setOut).model || ''; } catch (_) {}
   if (modelOverride) model = modelOverride;
-  const sbUrl = storybookUrlFor(sessionCwd());   // this project's Storybook, if running
+  const sbUrl = storybookUrlFor(dir);   // this project's Storybook, if running
   // Per-session vars cross the Windows→WSL hop via a shell export inside the command
   // (matches the Codex WSL launch); a real API key (API-key users) rides
   // WSLENV so its value isn't exposed in the process list. Subscription users need none.
@@ -2760,7 +2770,7 @@ async function launchClaudeAcp(modelOverride) {
   if (sbUrl) cmd = `export STORYBOOK_URL="${sbUrl}"; ${cmd}`;
   const key = process.env.ANTHROPIC_API_KEY;
   const env = key ? { ...process.env, WSLENV: (process.env.WSLENV ? process.env.WSLENV + ':' : '') + 'ANTHROPIC_API_KEY' } : process.env;
-  const proc = platform.nixSpawn(['bash', '-lic', cmd], { stdio: ['pipe', 'pipe', 'pipe'], cwd: sessionCwd(), env });
+  const proc = platform.nixSpawn(['bash', '-lic', cmd], { stdio: ['pipe', 'pipe', 'pipe'], cwd: dir, env });
   return { proc, version, model };
 }
 
@@ -2768,14 +2778,15 @@ async function launchClaudeAcp(modelOverride) {
 // WSL install (bash -lic for the nvm PATH), or a Windows npm install via
 // cmd.exe (the /mnt/c shim can't find node under WSL).
 async function launchAcpAgent(bin, acpArgs, agentKey, opts = {}) {
+  const dir = opts.cwd || sessionCwd();
   const env = await resolveAgentEnv(bin);
   if (!env) throw new Error(`${ACP_LABELS[agentKey] || agentKey} not found — install it (e.g. \`npm i -g\`).`);
-  const sbUrl = storybookUrlFor(sessionCwd());   // this project's Storybook, if running
+  const sbUrl = storybookUrlFor(dir);   // this project's Storybook, if running
   let proc, version = '';
   if (env === 'win') {
     version = await winVersion(bin);
     proc = platform.cmdSpawn(['/c', bin, ...acpArgs], {
-      stdio: ['pipe', 'pipe', 'pipe'], cwd: winCwd(), windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'], cwd: winCwd(dir), windowsHide: true,
       env: { ...process.env, ...(sbUrl ? { STORYBOOK_URL: sbUrl } : {}) },
     });
   } else {
@@ -2790,14 +2801,14 @@ async function launchAcpAgent(bin, acpArgs, agentKey, opts = {}) {
     // — the response still dies on the stdout side).
     if (opts.bridgeStdio) cmd = `cat | ${cmd} | cat`;
     if (sbUrl) cmd = `export STORYBOOK_URL="${sbUrl}"; ${cmd}`;
-    proc = platform.nixSpawn(['bash', '-lic', cmd], { stdio: ['pipe', 'pipe', 'pipe'], cwd: sessionCwd() });
+    proc = platform.nixSpawn(['bash', '-lic', cmd], { stdio: ['pipe', 'pipe', 'pipe'], cwd: dir });
   }
   return { proc, version, model: '' };
 }
 
 const ACP_LAUNCH = {
-  claude: { ensure: ensureClaudeAdapter, launch: (m) => launchClaudeAcp(m) },
-  codex:  { launch: () => launchAcpAgent('codex', ['acp'], 'codex') },
+  claude: { ensure: ensureClaudeAdapter, launch: (m, dir) => launchClaudeAcp(m, dir) },
+  codex:  { launch: (m, dir) => launchAcpAgent('codex', ['acp'], 'codex', { cwd: dir }) },
   // Hermes selects its model via a *profile* (provider + base_url + model in
   // one), not a --model flag — so the model menu picks a profile. `-p` is a
   // global flag and must precede the subcommand.
@@ -2806,10 +2817,10 @@ const ACP_LAUNCH = {
   // enforces it). An *advertised* model id — "openrouter:anthropic/claude-fable-5"
   // — is not a profile, and passing one made Hermes hang until the connect
   // timeout with no usable error. Ignore anything that isn't profile-shaped.
-  hermes: { launch: (m) => {
+  hermes: { launch: (m, dir) => {
     const profile = /^[a-z0-9][a-z0-9_-]*$/.test(String(m || '')) ? m : '';
     if (m && !profile) console.warn('[acp] ignoring non-profile Hermes selector:', m);
-    return launchAcpAgent('hermes', profile ? ['-p', profile, 'acp'] : ['acp'], 'hermes', { bridgeStdio: true });
+    return launchAcpAgent('hermes', profile ? ['-p', profile, 'acp'] : ['acp'], 'hermes', { bridgeStdio: true, cwd: dir });
   } },
 };
 
@@ -2833,7 +2844,8 @@ function acpModelState(r) {
   return { currentModelId: m.currentModelId || m.current_model_id || '', models };
 }
 
-async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resume = null) {
+async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resume = null, cwd = '') {
+  const dir = spawnCwd(cwd);
   const acp = await requireAcp();
   const { Readable, Writable } = require('stream');
   const cfg = ACP_LAUNCH[agentKey] || ACP_LAUNCH.claude;
@@ -2842,12 +2854,12 @@ async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resu
 
   let proc, acpVersion = '', acpModel = '';
   try {
-    ({ proc, version: acpVersion, model: acpModel } = await cfg.launch(modelOverride));
+    ({ proc, version: acpVersion, model: acpModel } = await cfg.launch(modelOverride, dir));
   } catch (err) {
     uiSend(IPC.ACP_ERROR, { id, message: `Failed to start ${ACP_LABELS[agentKey] || agentKey}: ${(err && err.message) || err}` });
     return;
   }
-  const acpCwd = sessionCwd();
+  const acpCwd = dir;
 
   // Accumulate stderr so we can show it if the process dies early
   let stderrBuf = '';
@@ -3027,7 +3039,7 @@ async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resu
     if (resume && resume.sessionId) {
       // Resume a past conversation. cwd MUST match the session's original project;
       // resume.cwd comes straight from the transcript (already a WSL path).
-      const rcwd = resume.cwd || platform.toWslPath(sessionCwd());
+      const rcwd = resume.cwd || platform.toWslPath(dir);
       if (caps.loadSession) {
         // loadSession replays the prior turns via session/update — the chat repopulates.
         const r = await conn.loadSession({ sessionId: resume.sessionId, cwd: rcwd, mcpServers: [] });
@@ -3040,7 +3052,7 @@ async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resu
         send(IPC.APP_TOAST, { message: "This agent can't replay history — started a fresh session in that project." });
       }
     } else {
-      const r = await conn.newSession({ cwd: platform.toWslPath(sessionCwd()), mcpServers: [] });
+      const r = await conn.newSession({ cwd: platform.toWslPath(dir), mcpServers: [] });
       sessionId = r.sessionId; modes = (r && r.modes) || null; models = acpModelState(r);
     }
     clearTimeout(connectTimer);
@@ -3117,8 +3129,8 @@ ipcMain.on(IPC.ACP_SET_MODE, async (_, { id, modeId } = {}) => {
   }
 });
 
-ipcMain.on(IPC.ACP_SPAWN, (_, { id, model, agent, resume } = {}) => {
-  spawnAcpSession(id, model || '', agent || 'claude', resume || null).catch(err => {
+ipcMain.on(IPC.ACP_SPAWN, (_, { id, model, agent, resume, cwd } = {}) => {
+  spawnAcpSession(id, model || '', agent || 'claude', resume || null, cwd || '').catch(err => {
     console.error('[acp] spawn error:', err);
     uiSend(IPC.ACP_ERROR, { id, message: acpErrText(err) });
   });
