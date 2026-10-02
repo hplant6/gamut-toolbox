@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-10-02
+
+### Added
+- **Projects can link extra folders.** A project whose code lives outside its own folder (say, a workspace folder whose work happens in a separate monorepo checkout) can now link that folder. Use **+ Link folder** on its Mission Control card, or answer **Part of <project>** when Gamut asks about a server or a newly cloned repo. Servers running anywhere in a linked folder are tracked under the project, with their start command, and agents are told the folder is in scope. Linking covers the whole repo, not just the one package a server runs from. A **Track…** button in the Running menu asks again about a folder you once marked "Not a project".
+- **Docker servers are tracked.** A port published by a Docker container is matched to a project through the folder its compose stack was started from. It starts with `docker start` and stops with `docker stop`. Gamut finds the Docker CLI on the host or inside WSL.
+- **The Sliders panel stays pinned to the page until you unpin it.** It no longer disappears when you close the Sliders column or pick another tool. It stays through reloads, in-app route changes and switches between the project page, Storybook and custom URLs, and only shows on the pages the panel is meant for. The page panel now has its own **Send**, Reset, hold-to-compare, Edit (opens the column) and **Unpin** (×) buttons. Unpinning puts the page back to the code's values, asking first if you have unsent changes. One panel is pinned per project; it comes back when you switch to that project and when you restart the app, and the toolbar button shows a ring while one is pinned. A new panel from an agent pins itself.
+
+### Changed
+- **The top-left logo is the white Gamut wordmark** with a chromatic-aberration split that eases in after launch and eases away while you hover it.
+- **The Changes tab follows the active project**, including its linked folders. When a project spans several repos, each file is prefixed with its repo name and the branch line names each repo's branch.
+- **Sliders colour controls accept any CSS colour** (`rgba()`, `hsl()`, `oklch()`, 8-digit hex, `var()`, keywords), kept exactly as the code writes it, and transparency survives picking a new colour. **From Page Vars** picks up those colour variables too.
+
+### Fixed
+- **Agent tabs run in their own project's folder.** Tabs reopened at startup, model switches, clears and reconnects used to start in whichever project was active at that moment, so an agent could end up editing the wrong repo.
+- **Opening a Sliders panel no longer repaints the page.** It used to push every starting value into the page, and colour values that weren't plain `#rrggbb` were replaced with white, which blanked page backgrounds.
+- **Servers start in their own folder** instead of always in the project's main folder.
+- **Pausing or switching away from a project can no longer kill Docker Desktop.** Freeing a container's port used to target the process holding it, which for Docker is its own backend.
+- **The Changes tab can't be pointed at another folder by the Storybook panel**, which used to repoint it behind the project switcher's back.
+- **Restarting a terminal tab reruns its own command** instead of always plain `claude`.
+
 ## [1.16.0] - 2026-09-25
 
 ### Added
