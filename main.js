@@ -4012,17 +4012,24 @@ function gitExec(args, { maxBuffer = 8 << 20, timeout = 15000, dir } = {}) {
 }
 function looksBinary(s) { return s.indexOf('\u0000') !== -1; }
 
-ipcMain.handle(IPC.DIFF_STATUS, async () => {
-  if (!currentProjectDir) return { ok: false, reason: 'no-folder' };
-  const inside = await gitExec(['rev-parse', '--is-inside-work-tree']);
-  if (inside.failed) return { ok: false, reason: inside.code === 'ENOENT' ? 'no-git' : 'not-git' };
-  const br = await gitExec(['rev-parse', '--abbrev-ref', 'HEAD']);
+// The repo root containing `dir`, in host form ('' when not a repo). git prints
+// C:/x for Windows paths and a distro-internal /path for \\wsl.localhost ones.
+async function gitTopLevel(dir) {
+  const r = await gitExec(['rev-parse', '--show-toplevel'], { dir });
+  if (r.failed) return { top: '', enoent: r.code === 'ENOENT' };
+  const t = r.stdout.trim();
+  const unc = /^(\\\\wsl(?:\.localhost|\$)\\[^\\]+)\\/i.exec(dir);
+  if (unc && t.startsWith('/')) return { top: unc[1] + t.replace(/\//g, '\\') };
+  return { top: path.normalize(t) };
+}
+async function repoStatus(top) {
+  const br = await gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], { dir: top });
   const branch = br.failed ? '' : br.stdout.trim();
-  const st = await gitExec(['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall']);
-  if (st.failed) return { ok: false, reason: 'not-git' };
+  const st = await gitExec(['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '-uall'], { dir: top });
+  if (st.failed) return null;
 
   const stats = {};
-  const num = await gitExec(['diff', 'HEAD', '--numstat']);
+  const num = await gitExec(['diff', 'HEAD', '--numstat'], { dir: top });
   if (!num.failed) num.stdout.split('\n').forEach(l => {
     const m = l.match(/^(\d+|-)\t(\d+|-)\t(.+)$/);
     if (!m) return;
@@ -4046,21 +4053,55 @@ ipcMain.handle(IPC.DIFF_STATUS, async () => {
     else if (xy.includes('R')) { status = 'renamed'; const a = p.split(' -> '); p = a[a.length - 1]; }
     else status = 'modified';
     const s = stats[p] || {};
-    files.push({ rel: p, status, added: s.added ?? null, deleted: s.deleted ?? null });
+    files.push({ path: p, status, added: s.added ?? null, deleted: s.deleted ?? null });
   });
+  return { branch, files };
+}
+
+// The renderer passes the active project's folders (rootDir + linked folders), so
+// the tab follows the project rather than whatever last set currentProjectDir
+// (the Storybook panel repoints it). Each folder resolves to its repo; a project
+// spanning several repos lists them all, rel prefixed with the repo name.
+let _diffRepos = new Set();   // repo roots from the last status — DIFF_FILE only reads inside these
+ipcMain.handle(IPC.DIFF_STATUS, async (_, { dirs } = {}) => {
+  const want = (Array.isArray(dirs) && dirs.length ? dirs : [currentProjectDir])
+    .filter(d => d && typeof d === 'string' && fs.existsSync(d));
+  if (!want.length) return { ok: false, reason: 'no-folder' };
+  const tops = []; let enoent = false;
+  for (const d of want) {
+    const { top, enoent: e } = await gitTopLevel(d);
+    if (e) enoent = true;
+    if (top && !tops.some(t => t.toLowerCase() === top.toLowerCase())) tops.push(top);
+  }
+  if (!tops.length) return { ok: false, reason: enoent ? 'no-git' : 'not-git' };
+  const multi = tops.length > 1;
+  const files = [], branches = [];
+  for (const top of tops) {
+    const r = await repoStatus(top);
+    if (!r) continue;
+    const name = path.basename(top);
+    if (r.branch) branches.push(multi ? `${name}: ${r.branch}` : r.branch);
+    for (const f of r.files) files.push({ ...f, repo: top, rel: multi ? `${name}/${f.path}` : f.path });
+  }
+  _diffRepos = new Set(tops);
   files.sort((a, b) => a.rel.localeCompare(b.rel));
-  return { ok: true, branch, files };
+  return { ok: true, branch: branches.join(' · '), files };
 });
 
-ipcMain.handle(IPC.DIFF_FILE, async (_, { rel, status } = {}) => {
+ipcMain.handle(IPC.DIFF_FILE, async (_, { rel, path: relPath, repo, status } = {}) => {
+  // Older callers send only `rel` (relative to the current project dir).
+  const root = repo && _diffRepos.has(repo) ? path.resolve(repo) : (currentProjectDir ? path.resolve(currentProjectDir) : '');
+  const p = relPath != null ? relPath : rel;
+  if (!root) return { before: '', after: '' };
   let before = '', after = '';
-  const gitPath = String(rel).replace(/\\/g, '/');
+  const gitPath = String(p).replace(/\\/g, '/');
   if (status !== 'added') {
-    const r = await gitExec(['show', 'HEAD:' + gitPath], { maxBuffer: 16 << 20 });
+    const r = await gitExec(['show', 'HEAD:' + gitPath], { maxBuffer: 16 << 20, dir: root });
     if (!r.failed) before = r.stdout;
   }
   if (status !== 'deleted') {
-    try { const f = codeSafeJoin(rel); if (f) after = await fsp.readFile(f, 'utf8'); } catch (_) {}
+    const target = path.resolve(root, String(p || ''));
+    if (target.startsWith(root + path.sep)) { try { after = await fsp.readFile(target, 'utf8'); } catch (_) {} }   // traversal guard
   }
   if (looksBinary(before) || looksBinary(after)) return { binary: true };
   return { before, after };

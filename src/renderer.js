@@ -10678,10 +10678,12 @@ ipcRenderer.on(IPC.UPDATE_AVAILABLE, (_, info) => {
     listEl.scrollTop = top;
   }
   async function pickFolder() {
-    const dir = await ipcRenderer.invoke(IPC.PICK_PROJECT_DIR).catch(() => null);
+    // A plain folder dialog: PICK_PROJECT_DIR also repoints main's project dir behind
+    // the switcher's back. Opening it as a project keeps the chip, agents and this tab in step.
+    const dir = await ipcRenderer.invoke(IPC.SHOW_FOLDER_DIALOG).catch(() => null);
     if (!dir) return;
-    ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir });
-    try { localStorage.setItem(LS.projectDir, dir); } catch (_) {}
+    if (typeof window.__activateProjectDir === 'function') window.__activateProjectDir(dir);
+    else { ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir }); try { localStorage.setItem(LS.projectDir, dir); } catch (_) {} }
     refresh();
   }
   document.getElementById('diff-folder')?.addEventListener('click', pickFolder);
@@ -10718,7 +10720,7 @@ ipcRenderer.on(IPC.UPDATE_AVAILABLE, (_, info) => {
     if (!ed) { showEmpty('no-git'); return; }
     if (token !== reqToken) return;    // superseded while Monaco loaded
     let res;
-    try { res = await ipcRenderer.invoke(IPC.DIFF_FILE, { rel: f.rel, status: f.status }); }
+    try { res = await ipcRenderer.invoke(IPC.DIFF_FILE, { rel: f.rel, path: f.path, repo: f.repo, status: f.status }); }
     catch (_) { res = null; }
     if (token !== reqToken) return;    // a newer selection won — drop this stale result
     emptyEl.style.display = 'none';
@@ -10738,6 +10740,16 @@ ipcRenderer.on(IPC.UPDATE_AVAILABLE, (_, info) => {
     selSig = sig;
   }
   const panelVisible = () => !!panel && getComputedStyle(panel).display !== 'none';
+  // The active project's folders (root + linked) — asked for explicitly, so the tab
+  // shows the project you're on even if something else repointed main's project dir.
+  // Empty (no active project) lets main fall back to its current dir.
+  function activeProjectDirs() {
+    try {
+      const id = currentProjectId();
+      const p = JSON.parse(localStorage.getItem(LS.projects) || '[]').find(x => x.id === id);
+      return p ? [p.rootDir, ...(p.linkedDirs || [])].filter(Boolean) : [];
+    } catch (_) { return []; }
+  }
   // ACP edit paths can be absolute (WSL) while git rel is repo-relative — match either.
   const sameFile = (rel, p) => { const n = String(p || '').replace(/\\/g, '/'); return !!n && (n === rel || n.endsWith('/' + rel)); };
 
@@ -10745,7 +10757,7 @@ ipcRenderer.on(IPC.UPDATE_AVAILABLE, (_, info) => {
     if (busy) { queued = true; if (followRel) queuedFollow = followRel; return; }   // coalesce overlapping pokes
     busy = true;
     try {
-      const res = await ipcRenderer.invoke(IPC.DIFF_STATUS);
+      const res = await ipcRenderer.invoke(IPC.DIFF_STATUS, { dirs: activeProjectDirs() });
       if (!res || !res.ok) {
         files = []; selected = null; selSig = ''; lastCount = 0; applyBadge(); branchEl.textContent = '';
         if (panelVisible()) { renderList(); showEmpty(res ? res.reason : 'not-git'); }
@@ -12593,6 +12605,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     try { localStorage.setItem(LS.projectDir, entry.rootDir); } catch (_) {}   // keep legacy key in sync
     updateChip();
     if (typeof onProjectChanged === 'function') onProjectChanged();   // swap the visible session tabs to this project
+    if (window.__diffPoke) window.__diffPoke();   // Changes follows the active project
     if (switching) switchProjectServers(leaving, entry.id);   // servers + Storybook follow the project
   }
 
@@ -12662,10 +12675,13 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       // Linking a parent folder supersedes any links nested inside it.
       p.linkedDirs = (p.linkedDirs || []).filter(d => !dirIn(d, clean)).concat(clean);
     });
+    if (window.__diffPoke) window.__diffPoke();   // a linked repo's changes show in Changes
   }
   function unlinkDir(projectId, dir) {
     updateProject(projectId, p => { p.linkedDirs = (p.linkedDirs || []).filter(d => pNorm(d) !== pNorm(dir)); });
+    if (window.__diffPoke) window.__diffPoke();
   }
+  window.__activateProjectDir = (dir) => activateProject(dir);
 
   async function adoptForeignServers(project) {
     if (!project || !project.rootDir) return;
