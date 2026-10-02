@@ -7155,6 +7155,7 @@ function setPickMode(mode, opts) {
     return;
   }
   pickMode = mode;
+  ipcRenderer.send(IPC.SLIDERS_SUSPEND, { on: true });   // a pinned Sliders panel would intercept the pick
   if (mode === 'box' || mode === 'lasso') lastDrawMode = mode;
   applyPickCursor(mode);
   document.querySelectorAll('.pick-btn').forEach(b => b.classList.remove('active'));
@@ -7267,6 +7268,7 @@ document.getElementById('animation-panel-add')?.addEventListener('click', () => 
 ipcRenderer.on(IPC.PICK_CANCELLED, () => paintAnimAdding(false));
 
 function clearPickMode() {
+  if (pickMode) ipcRenderer.send(IPC.SLIDERS_SUSPEND, { on: false });
   pickMode = null;
   applyPickCursor(null);
   document.querySelectorAll('.pick-btn').forEach(b => b.classList.remove('active'));
@@ -8941,9 +8943,14 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   const listEl = $('sl-list'), emptyEl = $('sl-empty'), errEl = $('sl-errors'), subEl = $('sl-sub');
   const panelSel = $('sl-panel-select'), presetSel = $('sl-preset'), presetName = $('sl-preset-name');
   const textarea = $('sl-textarea'), actionsEl = $('sl-actions');
-  const DEFAULT_SUB = 'Tune values live on the page, then send them to chat to bake in.';
+  const DEFAULT_SUB = 'The panel stays pinned on the page until you unpin it. Tune there, then send the values to bake in.';
 
-  let dir = '', cur = null;        // cur = { panel, file, values, rows: Map k → row api, demo }
+  // cur = the pinned panel: { panel, file, values, rows: Map k → row api, demo }. It lives
+  // on with the column closed (the page panel is the tool); only unpin() ends it.
+  let dir = '', cur = null;
+  const pinKey = () => 'gamut-sliders-pinned:' + dir;   // per project: restored on switch-in + app start
+  const columnOpen = () => !panel.hidden;
+  function paintPin() { btn.classList.toggle('pinned', !!(cur && !cur.demo)); }
   let pending = {}, raf = 0, comparing = false;
 
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -9235,19 +9242,20 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   async function load(id, { keepValues = false, demo = null } = {}) {
     const prev = cur;
     const r = await ipcRenderer.invoke(IPC.SLIDERS_OPEN, { id, demo, layout, theme: themeColors() });
-    if (!r || !r.panel) { cur = null; render(); showErrors((r && (r.errors || [r.error])) || ['Could not load the panel']); return; }
+    if (!r || !r.panel) { cur = null; paintPin(); render(); showErrors((r && (r.errors || [r.error])) || ['Could not load the panel']); return; }
     showErrors(r.errors);
     const saved = demo ? {} : keepValues && prev && prev.panel.id === id ? prev.values : (lsGet(lsKey(id)) || {});
     const values = {};
     for (const c of r.panel.controls) if (c.k && c.type !== 'button') values[c.k] = c.def;
     for (const [k, v] of Object.entries(saved)) if (k in values && typeof v === typeof values[k]) values[k] = v;
     cur = { panel: r.panel, file: r.file, values, rows: new Map(), demo: !!demo };
-    if (!demo) { lsSet('gamut-sliders-last:' + dir, id); panelSel.value = id; }
+    if (!demo) { lsSet('gamut-sliders-last:' + dir, id); lsSet(pinKey(), id); panelSel.value = id; }
+    paintPin();
     listEl.hidden = !!demo;   // sample rows only live on the page; the column keeps just the set-up
     $('sl-send').disabled = !!demo;
     $('sl-send').title = demo ? 'Sample values: nothing to send. Ask your agent for a real panel, or use From Page Vars.' : '';
     subEl.textContent = r.noPage ? 'Open a page in the browser to tune it.' : DEFAULT_SUB;
-    render(); renderPresets();
+    if (columnOpen()) { render(); renderPresets(); }
     // Only what differs from the code. The page already renders every def, so pushing
     // them all rewrote the page with the panel's copy of each value — for colours that
     // copy was lossy (non-hex → #ffffff), which is what blanked page backgrounds.
@@ -9260,32 +9268,57 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     }
     if (Object.keys(diff).length) push(diff);
   }
+  // Open the column: edit the pinned panel, or pin one if none is.
   async function open(preferId) {
     panel.hidden = false;
     btn.classList.add('active');
     btn.classList.remove('has-news');
     textarea.value = '';
-    const { panels, pick } = await refreshList(preferId);
+    const { panels, pick } = await refreshList(preferId || (cur && !cur.demo ? cur.panel.id : undefined));
     emptyEl.hidden = panels.length > 0;
     panelSel.parentNode.hidden = !panels.length;
     actionsEl.hidden = !panels.length;
     showErrors([]);
     if (!panels.length) { await load('__demo', { demo: demoPanel() }); return; }
+    if (cur && !cur.demo && cur.panel.id === pick) {   // already pinned → just show its rows
+      panelSel.value = pick; listEl.hidden = false; $('sl-send').disabled = false; $('sl-send').title = '';
+      subEl.textContent = DEFAULT_SUB; render(); renderPresets();
+      return;
+    }
     await load(pick);
   }
-  function close(send) {
+  // Close the column only — the pinned panel stays on the page. (The demo isn't pinned.)
+  function close() {
     if (panel.hidden) return;
-    if (send) {
-      const changes = Object.entries(changedValues()).map(([k, value]) => ({ k, value }));
-      const f = textarea.closest('.tp-foot');
-      ipcRenderer.send(IPC.SLIDERS_SEND, { changes, instruction: decorateToolInstruction(textarea.value.trim(), f) });
-      if (cur) lsSet(lsKey(cur.panel.id), null);   // baked → the code is the new starting point
-    } else {
-      ipcRenderer.send(IPC.SLIDERS_CLOSE);
-    }
     panel.hidden = true;
     btn.classList.remove('active');
-    cur = null; listEl.innerHTML = '';
+    listEl.innerHTML = '';
+    if (cur) cur.rows = new Map();
+    if (cur && cur.demo) unpin({ ask: false });
+  }
+  // Bake request. The panel stays pinned; the agent's def rewrite makes these values the baseline.
+  function send() {
+    if (!cur || cur.demo) return;
+    const changes = Object.entries(changedValues()).map(([k, value]) => ({ k, value }));
+    const f = textarea.closest('.tp-foot');
+    const instruction = columnOpen() ? decorateToolInstruction(textarea.value.trim(), f) : '';
+    if (!changes.length && !instruction) { showToast('Nothing changed yet', { duration: 1400 }); return; }
+    ipcRenderer.send(IPC.SLIDERS_SEND, { changes, instruction });
+    lsSet(lsKey(cur.panel.id), null);   // baked → the code is the new starting point
+    textarea.value = '';
+    close();
+  }
+  // Unpin: the panel leaves the page and the page snaps back to the code. Unsent tuning
+  // is discarded, so ask first when there is some.
+  function unpin({ ask = true } = {}) {
+    if (!cur) { close(); return; }
+    const n = cur.demo ? 0 : Object.keys(changedValues()).length;
+    if (ask && n && !confirm(`Unpin "${cur.panel.title}"? ${n} unsent change${n === 1 ? '' : 's'} will go back to the code's values.`)) return;
+    ipcRenderer.send(IPC.SLIDERS_CLOSE);
+    if (!cur.demo) { lsSet(lsKey(cur.panel.id), null); lsSet(pinKey(), null); }
+    cur = null;
+    paintPin();
+    close();
   }
 
   // ── Actions ──
@@ -9342,21 +9375,21 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   enhanceSelect(panelSel);
   enhanceSelect(presetSel);
 
-  // Toolbar / Alt+T toggles the panel. It doesn't arm a page overlay, so it can sit
-  // alongside the page; another tool taking over the column closes it.
-  btn.addEventListener('click', () => { if (!panel.hidden) close(false); else { clearPickMode(); open(); } });
+  // Toolbar / Alt+T toggles the column. Closing it (or another tool taking the column)
+  // leaves the pinned panel on the page; only Unpin removes it.
+  btn.addEventListener('click', () => { if (!panel.hidden) close(); else { clearPickMode(); open(); } });
   document.addEventListener('click', (e) => {
     const other = e.target.closest && e.target.closest('.pick-btn');
-    if (other && other !== btn && !panel.hidden) close(false);
+    if (other && other !== btn && !panel.hidden) close();
   }, true);
-  $('sl-send').addEventListener('click', () => close(true));
-  $('sl-cancel').addEventListener('click', () => close(false));
+  $('sl-send').addEventListener('click', send);
+  $('sl-cancel').addEventListener('click', () => unpin());
   textarea.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); close(true); }
-    else if (e.key === 'Escape') { e.preventDefault(); close(false); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
   });
   const typing = (el) => el && (el === textarea || el.tagName === 'INPUT' || el.isContentEditable);
-  addPanelEscClose(panel, () => close(false), typing);
+  addPanelEscClose(panel, () => close(), typing);
   document.addEventListener('keydown', (e) => {
     const ae = document.activeElement;
     if (panel.hidden || typing(ae) || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -9367,26 +9400,45 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   document.addEventListener('keyup', (e) => { if (e.key === '\\') compare(false); });
 
   // Drags on the in-page panel (already applied there) → mirror into these rows.
-  ipcRenderer.on(IPC.SLIDERS_PAGE_CHANGES, (_, { values, layout: l } = {}) => {
-    if (panel.hidden) return;
+  ipcRenderer.on(IPC.SLIDERS_PAGE_CHANGES, (_, { values, layout: l, actions } = {}) => {
+    if (!cur) return;
     if (l) setLayout({ collapsed: !!l.collapsed }, { send: false });
-    if (values && cur) for (const [k, v] of Object.entries(values)) setValue(k, v, { silent: true });
+    if (values) for (const [k, v] of Object.entries(values)) setValue(k, v, { silent: true });
+    for (const a of actions || []) {   // buttons on the page panel
+      if (a === 'send') send();
+      else if (a === 'reset') resetAll();
+      else if (a === 'unpin') unpin();
+      else if (a === 'edit' && panel.hidden) { clearPickMode(); open(); }
+    }
   });
+  // Project switch (and app start, which activates the saved project): the old project's
+  // panel comes off its page, and this project's pinned panel — if any — goes back on.
+  window.__slidersProjectChanged = async () => {
+    const prevDir = dir;
+    const { panels } = await refreshList(cur && !cur.demo ? cur.panel.id : undefined);
+    if (cur && dir === prevDir) return;   // same project re-activated — the pin is already up
+    if (cur) { ipcRenderer.send(IPC.SLIDERS_CLOSE); cur = null; paintPin(); close(); }
+    const id = lsGet(pinKey());
+    if (id && panels.some(p => p.id === id && !p.error)) await load(id);
+  };
 
   // A panel file appeared or changed. An agent's new panel opens by itself unless another
   // tool holds the column; then the toolbar button gets a dot.
+  // A panel file appeared or changed. The pinned panel reloads in place (the agent edited
+  // it, or baked values into its defs); a new agent panel pins itself onto the page.
   ipcRenderer.on(IPC.SLIDERS_CHANGED, async (_, { id, kind } = {}) => {
-    if (!panel.hidden) {
-      if (kind === 'change' && cur && cur.panel.id === id) { await refreshList(id); await load(id, { keepValues: true }); }
-      else if (kind === 'add' && cur && cur.demo) { await open(id); }
-      else if (kind === 'add') { await refreshList(cur && cur.panel.id); subEl.textContent = `New panel: ${id}. Pick it from the list.`; }
-      else if (kind === 'remove') { if (cur && cur.panel.id === id) close(false); else refreshList(cur && cur.panel.id); }
-      return;
-    }
+    const pinned = cur && !cur.demo && cur.panel.id === id;
+    if (kind === 'change' && pinned) { if (columnOpen()) await refreshList(id); await load(id, { keepValues: true }); return; }
+    if (kind === 'remove') { if (pinned) unpin({ ask: false }); else if (columnOpen()) refreshList(cur && cur.panel.id); return; }
     if (kind !== 'add') return;
-    const busy = pickMode || document.querySelector('.tool-panel:not([hidden])');
-    if (busy) btn.classList.add('has-news');
-    else open(id);
+    if (columnOpen() && cur && !cur.demo) {   // tuning another panel right now — don't yank it away
+      await refreshList(cur.panel.id); subEl.textContent = `New panel: ${id}. Pick it from the list.`; return;
+    }
+    if (columnOpen()) { await open(id); return; }
+    if (cur) ipcRenderer.send(IPC.SLIDERS_CLOSE);   // one pinned panel at a time
+    await refreshList(id);
+    await load(id);
+    btn.classList.add('has-news');
   });
 })();
 
@@ -12641,6 +12693,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     updateChip();
     if (typeof onProjectChanged === 'function') onProjectChanged();   // swap the visible session tabs to this project
     if (window.__diffPoke) window.__diffPoke();   // Changes follows the active project
+    if (window.__slidersProjectChanged) window.__slidersProjectChanged();   // pinned Sliders panel follows too
     if (switching) switchProjectServers(leaving, entry.id);   // servers + Storybook follow the project
   }
 

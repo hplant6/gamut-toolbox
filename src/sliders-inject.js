@@ -4,6 +4,8 @@
 //   window.__gamutSliders.load(panelId, controls)  → which controls to drive, and how
 //   window.__gamutSliders.apply({ k: value, … })   → { missing: [k…] } paths that didn't resolve
 //   window.__gamutSliders.unload()                 → drop the CSS properties we set
+//   window.__gamutSliders.compare(on)              → show the code's values while held (page only)
+//   window.__gamutSliders.suspend(on)              → hide the panel while a selection tool is armed
 //   window.__gamutSliders.scanVars()               → numeric/colour custom properties on :root
 //   window.__gamutSliders.values[panelId][k]       → current values, readable by page code
 //
@@ -43,6 +45,35 @@ function getSlidersRuntime() {
     return true;
   }
 
+  // Push one value into the page through the control's binds; false if a bind didn't land.
+  function drive(c, v) {
+    if (c.type === 'button') return true;
+    var ok = true;
+    try {
+      if (c.bind.css) {
+        var els = targets(c);
+        if (!els.length) ok = false;
+        els.forEach(function (el) {
+          el.style.setProperty(c.bind.css, fmtCss(c, v));
+          if (S._css.indexOf(el) === -1) S._css.push(el);
+        });
+      }
+      if (c.bind.path && !setPath(c.bind.path, v)) ok = false;
+    } catch (e) { ok = false; }
+    return ok;
+  }
+  // Hold-to-compare from the in-page panel: the code's values while held, then the tuned
+  // ones back. Page only — neither the stored values nor the rows change.
+  S.compare = function (on) {
+    var mine = S.values[S.panel] || {};
+    Object.keys(S.controls).forEach(function (k) {
+      var c = S.controls[k];
+      if (c.type === 'button' || c.def === '' || c.def == null) return;
+      drive(c, on ? c.def : (k in mine ? mine[k] : c.def));
+    });
+    return true;
+  };
+  S.suspend = function (on) { S._susp = !!on; if (S._ov) S.layout(); return true; };
   S.load = function (panel, controls) {
     S.panel = panel;
     S.controls = {};
@@ -61,17 +92,7 @@ function getSlidersRuntime() {
       if (c.type !== 'button') mine[k] = v;
       if (local && c.type !== 'button') S._q[k] = v;
       if (!local && S._ov) S._ov.set(k, v);
-      try {
-        if (c.bind.css && c.type !== 'button') {
-          var els = targets(c);
-          if (!els.length) missing.push(k);
-          els.forEach(function (el) {
-            el.style.setProperty(c.bind.css, fmtCss(c, v));
-            if (S._css.indexOf(el) === -1) S._css.push(el);
-          });
-        }
-        if (c.bind.path && c.type !== 'button' && !setPath(c.bind.path, v)) missing.push(k);
-      } catch (e) { missing.push(k); }
+      if (!drive(c, v)) missing.push(k);
       try {
         window.dispatchEvent(new CustomEvent('gamut:slider', { detail: { panel: S.panel, k: k, value: v, values: mine } }));
       } catch (e) {}
@@ -147,7 +168,8 @@ function installOverlay(S) {
     '.h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--st);cursor:default}',
     '.h b{flex:1;font:700 11px system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.tag{color:var(--ac);font-size:10px}',
-    '.x{all:unset;cursor:pointer;color:var(--dim);width:18px;text-align:center}.x:hover{color:var(--tx)}',
+    '.x{all:unset;cursor:pointer;color:var(--dim);min-width:18px;text-align:center;font-size:13px;line-height:1}.x:hover{color:var(--tx)}',
+    '.x.send{font:600 10px system-ui,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--ac);border:1px solid var(--ac);border-radius:4px;padding:2px 6px}.x.send:hover{color:var(--tx)}',
     '.b{overflow-y:auto;padding:4px 0 8px}.p.c .b{display:none}.p.c .h{border-bottom:0}',
     '.g{padding:10px 12px 4px;color:var(--dim);font:600 10px system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}',
     '.r{display:grid;grid-template-columns:1fr auto;gap:4px 8px;padding:6px 12px;align-items:center}',
@@ -185,7 +207,7 @@ function installOverlay(S) {
     if (!S._ov) return true;
     var p = S._ov.panel;
     p.className = 'p ' + l.corner + (l.collapsed ? ' c' : '');
-    S._ov.host.style.display = l.hidden ? 'none' : '';
+    S._ov.host.style.display = (l.hidden || S._susp) ? 'none' : '';
     S._ov.bg.style.opacity = String(l.alpha);
     // Blur fades out with the fill, so a fully transparent panel shows the page untouched.
     var blur = Math.round(l.alpha * 12);
@@ -198,6 +220,7 @@ function installOverlay(S) {
     S.removeOverlay();
     var host = el('div');
     host.id = 'gamut-sliders-overlay';
+    host.setAttribute('data-gamut-overlay', '');   // Export's cleanup hides it
     var root = host.attachShadow({ mode: 'open' });
     var style = el('style'); style.textContent = CSS; root.appendChild(style);
     var t = spec.theme || {};
@@ -209,10 +232,21 @@ function installOverlay(S) {
     var head = el('div', 'h');
     head.appendChild(el('b', '', spec.title || 'Sliders'));
     if (spec.demo) head.appendChild(el('span', 'tag', 'sample'));
-    var fold = el('button', 'x');
-    fold.title = 'Collapse';
+    // The panel stays pinned while the tool column is closed, so it carries its own
+    // actions. They queue for main's drain poll; the app does the work (same as the column).
+    function act(name) { S._q.__actions = (S._q.__actions || []).concat(name); }
+    function hb(label, title, cls) { var b = el('button', 'x' + (cls ? ' ' + cls : ''), label); b.title = title; head.appendChild(b); return b; }
+    if (!spec.demo) {
+      hb('Send', 'Send the tuned values to your agent to write into the code', 'send').addEventListener('click', function () { act('send'); });
+      hb('\u21ba', 'Reset every control to the code\'s value').addEventListener('click', function () { act('reset'); });
+      var cmp = hb('\u25d0', 'Hold to compare with the code\'s values');
+      cmp.addEventListener('pointerdown', function () { S.compare(true); });
+      ['pointerup', 'pointerleave'].forEach(function (ev) { cmp.addEventListener(ev, function () { S.compare(false); }); });
+    }
+    hb('\u2699', 'Edit in Gamut: panels, presets, placement').addEventListener('click', function () { act('edit'); });
+    var fold = hb('', 'Collapse');
     fold.addEventListener('click', function () { S.layout({ collapsed: !S._layout.collapsed }); S._q.__layout = S._layout; });
-    head.appendChild(fold);
+    hb('\u00d7', 'Unpin: remove the panel and put the code\'s values back').addEventListener('click', function () { act('unpin'); });
     var body = el('div', 'b');
     panel.appendChild(bg); panel.appendChild(head); panel.appendChild(body);
     root.appendChild(panel);

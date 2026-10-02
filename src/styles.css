@@ -6128,6 +6128,8 @@ select.tabs-add-select-field { display: none; }
 /* An agent wrote a new panel while another tool held the column. */
 #btn-sliders { position: relative; }
 #btn-sliders.has-news::after { content: ''; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--spec-accent); }
+/* A panel is pinned on the page (the column can be closed) — a ring, so it reads apart from has-news. */
+#btn-sliders.pinned:not(.has-news)::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; border: 1.5px solid var(--spec-accent); }
 
 /* Sliders — where the in-page panel sits: a 2×2 of mini "screens", the chosen corner lit. */
 #sl-layout { border-bottom: 1px solid var(--spec-structural); padding-bottom: 4px; }

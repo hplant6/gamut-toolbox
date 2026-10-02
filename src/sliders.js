@@ -211,7 +211,7 @@ function agentLines(projectDir) {
   return [
     '',
     '### Tuning sliders',
-    'When the user wants a temporary slider/adjustment panel to tune values live (animation timing, effects, three.js scenes), do **not** build UI in the project. Write a panel file instead; Gamut Toolbox renders it next to the page (Sliders tool, Alt+T) and opens it as soon as the file appears:',
+    'When the user wants a temporary slider/adjustment panel to tune values live (colours, animation timing, effects, three.js scenes), do **not** build UI in the project. Write a panel file instead: as soon as it appears, Gamut Toolbox pins it as a floating panel on the page (it stays there, across reloads and with other tools in use, until the user unpins it). The user tunes on the page and presses Send to have you bake the values in; the Sliders tool (Alt+T) is only for setup:',
     '',
     '```json',
     `// ${path.join(dir, '<id>.json')}`,

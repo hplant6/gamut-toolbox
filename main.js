@@ -1976,7 +1976,7 @@ ipcMain.handle(IPC.PROJECT_CAPTURE, async (_, { projectId } = {}) => {
   const b = browserView.getBounds();
   if (!b || b.width < PREVIEW_MIN_PX || b.height < PREVIEW_MIN_PX) return { ok: false, error: 'view hidden' };
   try {
-    const img = await browserView.webContents.capturePage();
+    const img = await capturePageClean(browserView.webContents);
     if (img.isEmpty()) return { ok: false };
     fs.writeFileSync(previewPath(projectId), img.resize({ width: 640 }).toPNG());
     return { ok: true };
@@ -2302,6 +2302,7 @@ ipcMain.on(IPC.RIGHT_PANEL_MODE, (_, mode) => {
   if (mode === 'figma' && !figmaView) createFigmaView();
   if (mode.startsWith('url:')) ensureCustomView(mode.slice(4));
   repositionAll();
+  slRetarget();   // a pinned Sliders panel follows the page that's showing
 });
 
 ipcMain.on(IPC.DESTROY_CUSTOM_VIEW, (_, url) => destroyCustomView(url));
@@ -4873,7 +4874,7 @@ ipcMain.handle(IPC.EXPORT_PREPARE, async (_, { metaOnly = false, reveal = false 
   const t = exporter.targetFor(view.webContents);
   try {
     const full = await exporter.preview(t, 360, 20000, { reveal });   // reveal: play scroll-triggered content first
-    const vis  = await view.webContents.capturePage();
+    const vis  = await capturePageClean(view.webContents);
     return {
       ok: true, cdp: t.usesCdp, metrics: full.metrics, full,
       visible: { data: vis.resize({ width: 360 }).toPNG().toString('base64') },
@@ -5188,7 +5189,7 @@ async function captureSelectionShot(view, items) {
   } catch (_) { await clearSelectionOverlay(view); return null; }
   if (!box || !box.w || !box.h) { await clearSelectionOverlay(view); return null; }
   try {
-    const image = await view.webContents.capturePage({
+    const image = await capturePageClean(view.webContents, {
       x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.w), height: Math.round(box.h),
     });
     const dir = path.join(app.getPath('userData'), 'screenshots');
@@ -5362,7 +5363,7 @@ ipcMain.on(IPC.PICK_SCREENSHOT, async () => {
     const { x, y, width, height, mouseUpX, mouseUpY } = sel;
 
     // Phase 2: capture that rectangle from the WebContentsView
-    const image = await view.webContents.capturePage({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
+    const image = await capturePageClean(view.webContents, { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
 
     // Phase 3: save PNG
     const screenshotsDir = path.join(app.getPath('userData'), 'screenshots');
@@ -5439,7 +5440,7 @@ ipcMain.on(IPC.MARKER_SEND, async (_, { instructions = '' } = {}) => {
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
     const canvasDataUrl = await view.webContents.executeJavaScript('window.__cathodeMarker&&window.__cathodeMarker.composite()');
-    const pageImage = await view.webContents.capturePage();
+    const pageImage = await capturePageClean(view.webContents);
     const pageB64   = pageImage.toPNG().toString('base64');
     markerCall('teardown');
     uiSend(IPC.DRAW_COMPOSITE, { pageB64, canvasDataUrl, instructions });
@@ -5593,7 +5594,7 @@ ipcMain.on(IPC.MOVE_PANEL_SEND, async (_, { instruction = '', notes = {}, screen
     try {
       await wc.executeJavaScript('window.__cathodeMove && window.__cathodeMove.hideChrome()');
       await new Promise(r => setTimeout(r, 60));
-      const img = await wc.capturePage();
+      const img = await capturePageClean(wc);
       const dir = path.join(app.getPath('userData'), 'screenshots');
       fs.mkdirSync(dir, { recursive: true });
       shot = path.join(dir, 'move-' + Date.now() + '.png');
@@ -5619,7 +5620,11 @@ ipcMain.on(IPC.MOVE_PANEL_SEND, async (_, { instruction = '', notes = {}, screen
 // Panel files live in <project>/.cathode/sliders/. The renderer owns the values; main
 // injects the page runtime, forwards each frame's changed values, and re-applies them
 // all after a reload so tuning survives HMR and refreshes.
-let slSession = null;   // { view, id, panel, values, layout, theme, demo, onLoad, poll }
+//
+// A session is a *pinned* panel: it outlives the tool column and stays on the page
+// until unpinned (SLIDERS_CLOSE). It follows the browser — full loads, client-side
+// route changes and pane switches — and only shows on pages its `match` allows.
+let slSession = null;   // { view, id, panel, values, layout, theme, demo, onLoad, onNav, poll, shown, suspended }
 function slExec(view, code) {
   if (!view || view.webContents.isDestroyed()) return Promise.resolve(null);
   return view.webContents.executeJavaScript(code, true).catch(() => null);
@@ -5634,7 +5639,53 @@ async function slPrime(s) {
 function slDetach(s) {
   if (!s) return;
   clearInterval(s.poll); s.poll = null;
-  if (s.onLoad && s.view && !s.view.webContents.isDestroyed()) s.view.webContents.removeListener('did-finish-load', s.onLoad);
+  if (s.view && !s.view.webContents.isDestroyed()) {
+    if (s.onLoad) s.view.webContents.removeListener('did-finish-load', s.onLoad);
+    if (s.onNav) s.view.webContents.removeListener('did-navigate-in-page', s.onNav);
+  }
+  s.onLoad = s.onNav = null;
+}
+// Show the panel on the session's view if the page is one it's for, re-applying the
+// tuned values; on a page it isn't for, put that page back the way the code has it.
+async function slSync(s) {
+  if (slSession !== s || !s.view || s.view.webContents.isDestroyed()) return;
+  const url = s.view.webContents.getURL();
+  const fits = !s.panel.match || sliders.urlMatches(s.panel.match, url);
+  if (!fits) { if (s.shown) { s.shown = false; await slRestore(s); } return; }
+  if (s.shown) return;   // same document, still matching — nothing to rebuild
+  await slPrime(s);
+  if (slSession !== s) return;
+  if (Object.keys(s.values).length) await slExec(s.view, `window.__gamutSliders.apply(${JSON.stringify(s.values)})`);
+  if (s.suspended) await slExec(s.view, 'window.__gamutSliders.suspend(true)');
+  s.shown = true;
+}
+function slAttach(s) {
+  if (!s.view) return;
+  slStartPoll(s);
+  s.onLoad = () => { s.shown = false; slSync(s); };   // a new document: nothing of ours is in it
+  let navT = 0;
+  s.onNav = () => { clearTimeout(navT); navT = setTimeout(() => slSync(s), 150); };   // SPA route change
+  s.view.webContents.on('did-finish-load', s.onLoad);
+  s.view.webContents.on('did-navigate-in-page', s.onNav);
+}
+// The browser pane changed (project page ↔ Storybook ↔ a custom URL): move the pinned
+// panel to whichever page is showing now, restoring the one it leaves.
+async function slRetarget() {
+  const s = slSession;
+  if (!s) return;
+  const view = getActivePickView();
+  if (view === s.view) return;
+  if (s.view) { slDetach(s); if (s.shown) await slRestore(s); }
+  if (slSession !== s) return;
+  s.view = view; s.shown = false;
+  if (view) { slAttach(s); await slSync(s); }
+}
+// Keep the pinned panel out of screenshots, previews and drawings of the page.
+async function capturePageClean(wc, rect) {
+  const vis = (v) => wc.executeJavaScript(`(function(){var h=document.getElementById('gamut-sliders-overlay');if(!h)return 0;h.style.visibility='${v}';return new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1)})})});})()`, true).catch(() => 0);
+  const had = slSession ? await vis('hidden') : 0;
+  try { return rect ? await wc.capturePage(rect) : await wc.capturePage(); }
+  finally { if (had) vis(''); }
 }
 // Drags on the in-page panel apply in the page directly; mirror them into the tool column.
 function slStartPoll(s) {
@@ -5644,6 +5695,7 @@ function slStartPoll(s) {
     const q = await slExec(s.view, 'window.__gamutSliders && window.__gamutSliders.drain ? window.__gamutSliders.drain() : null');
     if (!q || slSession !== s) return;
     if (q.__layout) { s.layout = { ...(s.layout || {}), ...q.__layout }; delete q.__layout; uiSend(IPC.SLIDERS_PAGE_CHANGES, { layout: s.layout }); }
+    if (q.__actions) { uiSend(IPC.SLIDERS_PAGE_CHANGES, { actions: q.__actions }); delete q.__actions; }   // Send/Reset/Edit/Unpin on the page panel
     Object.assign(s.values, q);
     if (Object.keys(q).length) uiSend(IPC.SLIDERS_PAGE_CHANGES, { values: q });
   }, 120);
@@ -5670,21 +5722,11 @@ ipcMain.handle(IPC.SLIDERS_OPEN, async (_, { id, demo, layout, theme } = {}) => 
   const keep = slSession && slSession.id === panel.id && slSession.view === view ? slSession : null;
   if (slSession && !keep) { slDetach(slSession); await slRestore(slSession); }   // switching panels or pages
   if (keep) slDetach(keep);
-  const s = { view, id: panel.id, panel, values: keep ? keep.values : {}, onLoad: null, poll: null,
+  const s = { view, id: panel.id, panel, values: keep ? keep.values : {}, onLoad: null, onNav: null, poll: null, shown: false,
+    suspended: !!(keep && keep.suspended),
     layout: layout || (keep && keep.layout) || null, theme: theme || (keep && keep.theme) || null, demo: !!demo };
   slSession = s;
-  if (view) {
-    await slPrime(s);
-    slStartPoll(s);
-    {
-      s.onLoad = async () => {
-        if (slSession !== s) return;
-        await slPrime(s);
-        if (Object.keys(s.values).length) await slExec(s.view, `window.__gamutSliders.apply(${JSON.stringify(s.values)})`);
-      };
-      view.webContents.on('did-finish-load', s.onLoad);
-    }
-  }
+  if (view) { slAttach(s); await slSync(s); }
   return { panel, errors, file: demo ? '' : path.join('.cathode', 'sliders', panel.id + '.json'), noPage: !view, demo: !!demo };
 });
 ipcMain.handle(IPC.SLIDERS_APPLY, async (_, { values } = {}) => {
@@ -5694,6 +5736,7 @@ ipcMain.handle(IPC.SLIDERS_APPLY, async (_, { values } = {}) => {
     const c = s.panel.controls.find(x => x.k === k);
     if (c && c.type !== 'button') s.values[k] = v;
   }
+  if (!s.shown) return { missing: [] };   // page isn't one this panel is for — values wait for one that is
   const r = await slExec(s.view, `window.__gamutSliders ? window.__gamutSliders.apply(${JSON.stringify(values)}) : null`);
   return r || { missing: [] };
 });
@@ -5703,7 +5746,13 @@ ipcMain.on(IPC.SLIDERS_LAYOUT, (_, l = {}) => {
   s.layout = { ...(s.layout || {}), ...l };
   slExec(s.view, `window.__gamutSliders && window.__gamutSliders.layout && window.__gamutSliders.layout(${JSON.stringify(s.layout)})`);
 });
-// Close without sending: put the page back the way the code has it.
+ipcMain.on(IPC.SLIDERS_SUSPEND, (_, { on } = {}) => {
+  const s = slSession;
+  if (!s) return;
+  s.suspended = !!on;
+  if (s.shown) slExec(s.view, `window.__gamutSliders && window.__gamutSliders.suspend && window.__gamutSliders.suspend(${s.suspended})`);
+});
+// Unpin: put the page back the way the code has it.
 ipcMain.on(IPC.SLIDERS_CLOSE, async () => {
   const s = slSession;
   slSession = null;
@@ -5711,15 +5760,11 @@ ipcMain.on(IPC.SLIDERS_CLOSE, async () => {
   slDetach(s);
   await slRestore(s);
 });
-// Send: the page keeps the tuned look (the agent is about to bake it in); only the
-// reload hook goes, so a later refresh shows the code as it then is.
+// Send: compose the bake request. The panel stays pinned with the tuned values on the
+// page; once the agent rewrites the panel's defs, those values simply stop being "changed".
 ipcMain.on(IPC.SLIDERS_SEND, (_, { changes = [], instruction = '' } = {}) => {
   const s = slSession;
-  slSession = null;
-  if (!s) return;
-  slDetach(s);
-  slExec(s.view, 'window.__gamutSliders && window.__gamutSliders.removeOverlay()');
-  if (s.demo) return;
+  if (!s || s.demo) return;
   const file = path.join(currentProjectDir, '.cathode', 'sliders', s.id + '.json');
   const instr = String(instruction || '').trim();
   if (!changes.length && !instr) return;
@@ -5920,7 +5965,7 @@ ipcMain.on(IPC.PICK_EYEDROPPER, async () => {
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
     // Snapshot the rendered viewport so the loupe can sample exact pixels.
-    const image = await view.webContents.capturePage();
+    const image = await capturePageClean(view.webContents);
     const sel = await view.webContents.executeJavaScript(getEyedropperScript(image.toDataURL()));
     if (!sel) { uiSend(IPC.PICK_CANCELLED); return; }   // cancelled during hover
     pendingEyedropper = { view };
