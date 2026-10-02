@@ -456,6 +456,17 @@ html, body {
 .mc-hd-work { font-family: var(--font-mono); font-size: 11px; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-hd-active .mc-hd-work { color: var(--mc-green); }
 .mc-hd-idle .mc-hd-work { color: var(--spec-text-dim); }
+/* Linked folders — extra code roots whose servers belong to this project. Bare
+   buttons default to the 28×28 icon size, so both buttons reset their box. */
+.mc-hd-link { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.mc-hd-link-path { font-family: var(--font-mono); font-size: 11px; opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-hd-active .mc-hd-link-path { color: var(--mc-green); }
+.mc-hd-idle .mc-hd-link-path { color: var(--spec-text-dim); }
+.mc-hd-link-x { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 14px; height: 14px; padding: 0; background: transparent; border: none; cursor: pointer; color: var(--spec-text-dim); opacity: 0.7; }
+.mc-hd-link-x:hover { opacity: 1; color: var(--spec-text); }
+.mc-hd-link-x svg { width: 10px; height: 10px; }
+.mc-hd-link-add { align-self: flex-start; width: auto; height: auto; padding: 0; background: transparent; border: none; cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--mc-green); opacity: 0.7; }
+.mc-hd-link-add:hover { opacity: 1; text-decoration: underline; }
 .ps-item-path.is-work { color: var(--accent); }
 .mc-hd-edit { font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
 .mc-hd-edit-k { font-weight: 900; text-transform: uppercase; }

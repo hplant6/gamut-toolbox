@@ -825,6 +825,18 @@ function projectDirFor(pid) {
   try { const p = JSON.parse(localStorage.getItem(LS.projects) || '[]').find(x => x.id === pid); return (p && p.rootDir) || ''; } catch (_) { return ''; }
 }
 function sessionDir(id) { const s = sessions.get(id); return projectDirFor(s && s.projectId); }
+// Where a project server starts: its own cwd when that's absolute (servers captured
+// from a linked folder live outside rootDir), else relative to the project root.
+function serverCwdFor(project, srv) {
+  const root = (project && project.rootDir) || '';
+  const c = String((srv && srv.cwd) || '').trim();
+  if (/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(c)) return c;
+  if (!c || c === '.') return root;
+  return root.replace(/[\\/]+$/, '') + (root.includes('\\') ? '\\' : '/') + c.replace(/^\.[\\/]/, '');
+}
+function serverStartArg(project, srv) {
+  return { id: srv.id, projectId: project.id, name: srv.name, cmd: srv.cmd, cwd: serverCwdFor(project, srv), port: srv.port, runIn: srv.runIn, docker: srv.docker || undefined };
+}
 
 function getDefaultProfile() {
   return sessionProfiles[0] || { name: 'Claude Code', command: 'claude' };
@@ -6675,10 +6687,7 @@ document.getElementById('wf-project-run')?.addEventListener('click', async () =>
   if (!srv || !srv.cmd) { startDevServer(wfProject.rootDir); return; }   // no recipe yet → let the agent work it out
   const label = btn.textContent;
   btn.disabled = true; btn.textContent = 'Starting…';
-  const r = await ipcRenderer.invoke(IPC.SERVER_START, {
-    id: srv.id, projectId: wfProject.id, name: srv.name, cmd: srv.cmd,
-    cwd: wfProject.rootDir, port: srv.port, runIn: srv.runIn,
-  }).catch(() => null);
+  const r = await ipcRenderer.invoke(IPC.SERVER_START, serverStartArg(wfProject, srv)).catch(() => null);
   const port = (r && r.port) || srv.port;
   if (port && await wfWaitForPort(port)) wfOpenPort(port);
   btn.disabled = false; btn.textContent = label;
@@ -12631,6 +12640,33 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
 
   // Pull in servers running inside this project's folder that we didn't start
   // (e.g. the agent launched one), so they're managed — and stopped — with it.
+  // Linked folders: code a project owns outside its rootDir (e.g. a monorepo
+  // checkout the project's work happens in). Servers running in any of them
+  // belong to the project, and agents are told they're in scope.
+  const dirIn = (c, d) => { const a = pNorm(c), b = pNorm(d); return !!a && !!b && (a === b || a.startsWith(b + '/')); };
+  function projectDirs(p) { return [p.rootDir, ...(p.linkedDirs || [])].filter(Boolean); }
+  // The project a folder belongs to — the most specific match wins, so a project
+  // nested inside another (or inside a linked folder) keeps its own servers.
+  function ownerOfDir(dir, list = loadProjects()) {
+    let best = null, bestLen = -1;
+    for (const p of list) for (const d of projectDirs(p)) {
+      if (dirIn(dir, d) && pNorm(d).length > bestLen) { best = p; bestLen = pNorm(d).length; }
+    }
+    return best;
+  }
+  function linkDir(projectId, dir) {
+    if (!projectId || !dir) return;
+    const clean = String(dir).replace(/[\\/]+$/, '');
+    updateProject(projectId, p => {
+      if (projectDirs(p).some(d => dirIn(clean, d))) return;   // already covered
+      // Linking a parent folder supersedes any links nested inside it.
+      p.linkedDirs = (p.linkedDirs || []).filter(d => !dirIn(d, clean)).concat(clean);
+    });
+  }
+  function unlinkDir(projectId, dir) {
+    updateProject(projectId, p => { p.linkedDirs = (p.linkedDirs || []).filter(d => pNorm(d) !== pNorm(dir)); });
+  }
+
   async function adoptForeignServers(project) {
     if (!project || !project.rootDir) return;
     let servers = [];
@@ -12644,9 +12680,9 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     for (const port of fresh) {
       const info = dirs[port];
       if (!info || !info.dir) continue;
-      const inside = pNorm(info.dir) === pNorm(project.rootDir) || pNorm(info.dir).startsWith(pNorm(project.rootDir) + '/');
-      if (!inside) continue;
-      addServer(project.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: info.dir, port: +port, runIn: 'wsl' });
+      const owner = ownerOfDir(info.dir);
+      if (!owner || owner.id !== project.id) continue;
+      addServer(project.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: info.dir, port: +port, runIn: 'wsl', docker: info.docker });
     }
   }
 
@@ -12671,11 +12707,12 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     if (!project || !project.rootDir || project.branchScoped) return;   // branch-scoped projects share a folder → no per-folder manifest (needs worktrees)
     const data = {
       id: project.id, name: project.name, rootDir: project.rootDir, repo: project.repo || undefined,
+      linkedDirs: (project.linkedDirs && project.linkedDirs.length) ? project.linkedDirs : undefined,
       servers: (project.servers || []).map(s => ({
         id: s.id, name: s.name,
         role: s.role || (/storybook/i.test(s.name || '') ? 'storybook' : undefined),
         cmd: s.cmd || '', cwd: s.cwd || '.', port: s.port || null,
-        runIn: s.runIn || 'wsl', autostart: !!s.autostart,
+        runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined,
       })),
     };
     ipcRenderer.invoke(IPC.MANIFEST_WRITE, { dir: project.rootDir, data }).catch(() => {});
@@ -12715,7 +12752,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
   function addServer(projectId, def) {
     updateProject(projectId, p => {
       p.servers = p.servers || [];
-      p.servers.push({ id: genId(), name: def.name || 'server', cmd: def.cmd || '', cwd: def.cwd || '.', port: def.port || null, runIn: def.runIn || 'wsl', role: def.role, autostart: !!def.autostart });
+      p.servers.push({ id: genId(), name: def.name || 'server', cmd: def.cmd || '', cwd: def.cwd || '.', port: def.port || null, runIn: def.runIn || 'wsl', role: def.role, autostart: !!def.autostart, docker: def.docker || undefined });
     });
   }
   // Pause a project's running servers (stop + flag) — used by the manual Pause
@@ -12751,8 +12788,8 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     const start  = paused.length ? paused : servers.filter(s => s.autostart);
     let primary = 0;   // the port to show in the Browser (first web server we started)
     for (const s of start) {
-      if (!s.cmd) continue;
-      const r = await ipcRenderer.invoke(IPC.SERVER_START, { id: s.id, projectId: project.id, name: s.name, cmd: s.cmd, cwd: project.rootDir, port: s.port, runIn: s.runIn }).catch(() => null);
+      if (!s.cmd && !s.docker) continue;
+      const r = await ipcRenderer.invoke(IPC.SERVER_START, serverStartArg(project, s)).catch(() => null);
       const port = (r && r.ok && r.port) || s.port;
       if (port && port !== s.port) updateServer(project.id, s.id, { port });
       updateServer(project.id, s.id, { paused: false });
@@ -12803,8 +12840,9 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       if (!p.rootDir) continue;
       let m = null;
       try { ({ manifest: m } = await ipcRenderer.invoke(IPC.MANIFEST_READ, { dir: p.rootDir })); } catch (_) {}
+      if (m && Array.isArray(m.linkedDirs) && m.linkedDirs.length && !(p.linkedDirs && p.linkedDirs.length)) { p.linkedDirs = m.linkedDirs.slice(); changed = true; }
       if (m && Array.isArray(m.servers) && (!p.servers || !p.servers.length)) {
-        p.servers = m.servers.map(s => ({ id: s.id || genId(), name: s.name, role: s.role, cmd: s.cmd, cwd: s.cwd, port: s.port || null, runIn: s.runIn || 'wsl', autostart: !!s.autostart }));
+        p.servers = m.servers.map(s => ({ id: s.id || genId(), name: s.name, role: s.role, cmd: s.cmd, cwd: s.cwd, port: s.port || null, runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined }));
         changed = true;
       } else if (!m) {
         syncManifest(p);   // no manifest yet → migrate this project into its folder
@@ -13008,14 +13046,14 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       const untracked = [];
       for (const [port, name] of found) {
         const info = dirs[port];
-        const owner = info && info.dir ? projects.find(p => sameOrInside(info.dir, p.rootDir)) : null;
+        const owner = info && info.dir ? ownerOfDir(info.dir, projects) : null;
         if (owner) {
           if (!(owner.servers || []).some(s => +s.port === port)) {   // capture the running server onto its project (once)
-            addServer(owner.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: info.dir, port, runIn: 'wsl' });
+            addServer(owner.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: info.dir, port, runIn: 'wsl', docker: info.docker });
           }
         } else {
-          untracked.push({ port, name });
-          if (info && info.dir) maybeAskServerProject(info.dir, info.comm || name, port);   // Phase 3: offer to make it a project
+          untracked.push({ port, name: name || (info && info.comm) || '', info });
+          if (info && info.dir) maybeAskServerProject(info, port);   // Phase 3: offer to make it a project
         }
       }
       renderUntracked(untracked.sort((a, b) => a.port - b.port));
@@ -13029,7 +13067,8 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       return c === p || c.startsWith(p + '/');
     }
     const normDir = s => String(s || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
-    const isKnownProject = (dir) => loadProjects().some(p => sameOrInside(dir, p.rootDir));
+    const isKnownProject = (dir) => !!ownerOfDir(dir);
+
 
     // ── Project classification prompt (Phase 3) ──────────────────
     // Decision memory so we never re-ask about a folder/branch we've already ruled on.
@@ -13077,18 +13116,31 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     }
 
     // Trigger: a dev server running in an unknown, project-ish folder.
-    async function maybeAskServerProject(dir, name, port) {
+    // force: asked from the Running menu — skip the remembered decision (an old
+    // "Not a project" would otherwise hide the folder for good) and the project-ish check.
+    async function maybeAskServerProject(info, port, force = false) {
+      const dir = info && info.dir;
       const key = decisionKey(dir);
-      if (!dir || promptedThisSession.has(key) || loadDecisions()[key] || isKnownProject(dir)) return;
+      if (!dir || isKnownProject(dir)) return;
+      if (!force && (promptedThisSession.has(key) || loadDecisions()[key])) return;
       promptedThisSession.add(key);
       let di = {};
       try { di = await ipcRenderer.invoke(IPC.DIR_INFO, { dir }); } catch (_) {}
-      if (!di || (!di.hasGit && !di.hasPkg)) return;   // not project-ish → don't nag
+      if (!force && (!di || (!di.hasGit && !di.hasPkg))) return;   // not project-ish → don't nag
+      // Link the whole repo, not just this server's package folder — the repo's other
+      // servers (a monorepo's API, a compose stack) then follow without re-asking.
+      const linkTo = (di && di.gitRoot) || dir;
       const active = activeProject();
-      const buttons = [{ label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); adoptDirAsProject(dir, di); } }];
-      if (active) buttons.push({ label: 'Part of ' + active.name, onPick: () => { saveDecision(key, 'attach'); addServer(active.id, { name: name || 'dev', cwd: dir, port, runIn: 'wsl' }); } });
+      const buttons = [{ label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); adoptDirAsProject(linkTo, di); } }];
+      if (active) buttons.push({ label: 'Part of ' + active.name, onPick: () => {
+        saveDecision(key, 'attach');
+        linkDir(active.id, linkTo);
+        refreshUntracked();
+        const p = getProject(active.id);
+        if (p && !(p.servers || []).some(s => +s.port === port)) addServer(active.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: dir, port, runIn: 'wsl', docker: info.docker });
+      } });
       buttons.push({ label: 'Not a project', onPick: () => saveDecision(key, 'ignore') });
-      askClassify({ question: `A dev server is running in “${di.name}” (${dir}), not part of any project. Track it?`, buttons });
+      askClassify({ question: `A dev server is running in “${(di && di.name) || nameFor(dir)}” (${dir}), not part of any project. Track it?`, buttons });
     }
 
     // Triggers from main: a new branch, or a repo cloned into a subfolder.
@@ -13143,13 +13195,12 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         const key = decisionKey(t.dir);
         if (promptedThisSession.has(key) || loadDecisions()[key] || isKnownProject(t.dir)) return;
         promptedThisSession.add(key);
-        askClassify({
-          question: `New repo “${t.name}” at ${t.dir}. Track it as a project?`,
-          buttons: [
-            { label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); adoptDirAsProject(t.dir, t); } },
-            { label: 'Not a project', onPick: () => saveDecision(key, 'ignore') },
-          ],
-        });
+        const active = activeProject();
+        const buttons = [{ label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); adoptDirAsProject(t.dir, t); } }];
+        // A repo cloned next to the project is often the code the project works on.
+        if (active) buttons.push({ label: 'Part of ' + active.name, onPick: () => { saveDecision(key, 'attach'); linkDir(active.id, t.dir); refreshUntracked(); } });
+        buttons.push({ label: 'Not a project', onPick: () => saveDecision(key, 'ignore') });
+        askClassify({ question: `New repo “${t.name}” at ${t.dir}. Track it as a project?`, buttons });
       }
     });
 
@@ -13182,7 +13233,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       if (mcRunningCount) mcRunningCount.textContent = String(untrackedItems.length);
       mcRunningMenu.innerHTML = '';
       const list = document.createElement('div'); list.className = 'mc-untracked-list';
-      untrackedItems.forEach(({ port, name }) => {
+      untrackedItems.forEach(({ port, name, info }) => {
         const row = document.createElement('div'); row.className = 'mc-untracked-item';
         row.innerHTML = '<span class="mc-untracked-dot"></span><span class="mc-untracked-port"></span><span class="mc-untracked-name"></span><span class="mc-untracked-acts"></span>';
         row.querySelector('.mc-untracked-port').textContent = 'localhost:' + port;
@@ -13201,7 +13252,14 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
           closeRunningMenu();
           renderMC(); refreshUntracked();
         });
-        acts.append(open, adopt);
+        acts.append(open);
+        if (info && info.dir) {   // we know its folder → offer the classify prompt again, even if it was dismissed before
+          const track = document.createElement('button'); track.className = 'mc-untracked-btn'; track.textContent = 'Track…';
+          track.title = info.dir;
+          track.addEventListener('click', () => { closeRunningMenu(); maybeAskServerProject(info, port, true); });
+          acts.append(track);
+        }
+        acts.append(adopt);
         list.appendChild(row);
       });
       mcRunningMenu.appendChild(list);
@@ -13214,7 +13272,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       try { ({ running } = await ipcRenderer.invoke(IPC.SERVER_STATUS, { ports })); } catch (_) {}
       for (const s of (p.servers || [])) {
         if (s.port && running[s.port]) continue;
-        const r = await ipcRenderer.invoke(IPC.SERVER_START, { id: s.id, projectId: p.id, name: s.name, cmd: s.cmd, cwd: p.rootDir, port: s.port, runIn: s.runIn }).catch(() => null);
+        const r = await ipcRenderer.invoke(IPC.SERVER_START, serverStartArg(p, s)).catch(() => null);
         if (r && r.ok && r.port && r.port !== s.port) updateServer(p.id, s.id, { port: r.port });
       }
       setTimeout(refreshStatus, 1500);
@@ -13242,7 +13300,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       row.querySelector('.mc-row-name').title = s.cmd || '';
       row.querySelector('.mc-row-port').textContent = s.port || '';
       const acts = row.querySelector('.mc-row-acts');
-      const arg = () => ({ id: s.id, projectId: p.id, name: s.name, cmd: s.cmd, cwd: p.rootDir, port: s.port, runIn: s.runIn });
+      const arg = () => serverStartArg(p, s);
       const statusCell = row.querySelector('.mc-row-status');
       statusCell.title = 'Click to view this server’s output'; statusCell.style.cursor = 'pointer';
       statusCell.addEventListener('click', () => showServerLog(s));
@@ -13309,6 +13367,24 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       });
       const path  = document.createElement('div'); path.className  = 'mc-hd-path';  path.textContent  = p.rootDir;
       l.append(title, path);
+      (p.linkedDirs || []).forEach(d => {
+        const row = document.createElement('div'); row.className = 'mc-hd-link';
+        const t = document.createElement('span'); t.className = 'mc-hd-link-path'; t.textContent = '+ ' + d; t.title = 'Linked folder — its servers belong to this project';
+        const x = document.createElement('button'); x.className = 'mc-hd-link-x'; x.innerHTML = ICON_CLOSE; x.title = 'Unlink folder';
+        x.addEventListener('click', (e) => { e.stopPropagation(); unlinkDir(p.id, d); renderMC(); });
+        row.append(t, x); l.appendChild(row);
+      });
+      if (isActive) {
+        const add = document.createElement('button'); add.className = 'mc-hd-link-add'; add.textContent = '+ Link folder';
+        add.title = 'Link another folder (e.g. the repo this project works in) — servers running there are tracked here';
+        add.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const dir = await ipcRenderer.invoke(IPC.SHOW_FOLDER_DIALOG);
+          if (!dir) return;
+          linkDir(p.id, dir); renderMC(); refreshUntracked();
+        });
+        l.appendChild(add);
+      }
       if (p.work) { const w = document.createElement('div'); w.className = 'mc-hd-work'; w.textContent = p.work; l.appendChild(w); }
       const r = document.createElement('div'); r.className = 'mc-hd-col mc-hd-r';
       const badge = document.createElement('span'); badge.className = 'mc-badge ' + (isActive ? 'mc-badge-active' : 'mc-badge-idle'); badge.textContent = isActive ? 'Active' : 'Idle';

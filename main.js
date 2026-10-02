@@ -1608,7 +1608,14 @@ function detectRunIn(cwd) {
   })();
 }
 
-async function startProjectServer({ id, projectId, name, cmd, cwd, port, runIn } = {}) {
+async function startProjectServer({ id, projectId, name, cmd, cwd, port, runIn, docker } = {}) {
+  // A container is started by Docker, not by us — there's no process to own or log.
+  if (docker && docker.container) {
+    if (!DOCKER_NAME_RE.test(docker.container)) return { ok: false, error: 'invalid container name' };
+    const o = await dockerExec(['start', docker.container], 30000);
+    _dockerCache.at = 0;
+    return o == null ? { ok: false, error: 'docker start failed (is Docker running?)' } : { ok: true, port: safePort(port) };
+  }
   if (!id || !cmd || !cwd) return { ok: false, error: 'missing id/cmd/cwd' };
   const prev = projectServers.get(id);
   if (prev && prev.proc && prev.status !== 'stopped' && prev.status !== 'error') {
@@ -1657,6 +1664,14 @@ const WSL_RELAY_RE = /^(wslrelay|wslhost|svchost|system|vmmem|vmmemwsl)$/i;
 async function killPort(port) {
   const p = safePort(port);
   if (!p) return { ok: false, error: 'invalid-port' };
+  // A container's port: stop the container. Killing the port's owner here would take
+  // down Docker Desktop's backend (Windows/macOS) or docker-proxy, not the server.
+  const c = (await dockerPorts())[p];
+  if (c && DOCKER_NAME_RE.test(c.container)) {
+    await dockerExec(['stop', c.container], 30000);
+    _dockerCache.at = 0;
+    return { ok: true };
+  }
   if (IS_WIN_HOST) {
     try { platform.nixSpawn(['bash', '-lic', `fuser -k ${p}/tcp`], { stdio: 'ignore', windowsHide: true }); } catch (_) {}
     await new Promise(r => setTimeout(r, 400));
@@ -1665,7 +1680,8 @@ async function killPort(port) {
   try {
     const r = await platform.listPorts();
     const hit = r && r.ok ? (r.ports || []).find(x => x.port === p) : null;
-    if (hit && hit.pid && !WSL_RELAY_RE.test(String(hit.name || ''))) await platform.killPid(hit.pid);
+    const hn = String(hit && hit.name || '').replace(/\.exe$/i, '');
+    if (hit && hit.pid && !WSL_RELAY_RE.test(hn) && !DOCKER_PROC_RE.test(hn)) await platform.killPid(hit.pid);
   } catch (_) {}
   return { ok: true };
 }
@@ -1790,9 +1806,79 @@ function runNixCaptureStdin(script, timeoutMs = 6000) {
     } catch (_) { fin(); }
   });
 }
+// ── Docker-published ports ───────────────────────────────────────
+// Compose stamps every container with the folder it was brought up from, which is
+// what ties a container's port to a project. The CLI may live on the host (Windows
+// docker.exe / macOS / Linux) or only inside WSL — try each, remember what worked,
+// and cache briefly (refreshUntracked polls). A missing Docker costs one probe per 30s.
+const DOCKER_PROC_RE = /^(com\.docker\.|docker|vpnkit|dockerd)/i;   // Docker's own port forwarders — never ours to kill
+const DOCKER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const DOCKER_FMT = '{{.Names}}\t{{.Ports}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}';
+const DOCKER_HOST_BINS = IS_WIN_HOST ? ['docker']
+  : ['docker', '/usr/local/bin/docker', '/opt/homebrew/bin/docker', '/Applications/Docker.app/Contents/Resources/bin/docker'];
+let _dockerRunner = null;                 // { kind: 'host', bin } | { kind: 'nix' }
+let _dockerCache = { at: 0, map: {} };
+function dockerRun(runner, args, timeout = 6000) {
+  if (runner.kind === 'host') {
+    return new Promise((resolve) => execFile(runner.bin, args, { timeout, windowsHide: true },
+      (err, o) => resolve(err ? null : String(o || ''))));
+  }
+  // WSL / login shell: script over stdin, so the Go-template quotes survive the hop.
+  const q = (a) => "'" + String(a).replace(/'/g, "'\\''") + "'";
+  return runNixCaptureStdin(`command -v docker >/dev/null || exit 1; docker ${args.map(q).join(' ')} && echo __ok__`, timeout)
+    .then(lines => lines.includes('__ok__') ? lines.filter(l => l !== '__ok__').join('\n') : null);
+}
+async function dockerExec(args, timeout) {
+  if (_dockerRunner) {
+    const o = await dockerRun(_dockerRunner, args, timeout);
+    if (o != null) return o;
+    _dockerRunner = null;   // the CLI went away (Docker quit, integration toggled) — re-probe
+  }
+  const runners = DOCKER_HOST_BINS.map(bin => ({ kind: 'host', bin }));
+  if (IS_WIN_HOST) runners.push({ kind: 'nix' });
+  for (const r of runners) {
+    const o = await dockerRun(r, args, timeout);
+    if (o != null) { _dockerRunner = r; return o; }
+  }
+  return null;
+}
+// { [hostPort]: { container, dir (host path), service } } for running containers.
+async function dockerPorts() {
+  const now = Date.now();
+  if (now - _dockerCache.at < (_dockerCache.ok ? 5000 : 30000)) return _dockerCache.map;
+  const map = {};
+  const o = await dockerExec(['ps', '--format', DOCKER_FMT], 6000);
+  for (const ln of String(o || '').split('\n')) {
+    const [container, ports, wd, service] = ln.split('\t');
+    if (!container || !ports) continue;
+    const dir = wslToHost((wd || '').trim());
+    for (const m of ports.matchAll(/:(\d+)->\d+\/tcp/g)) {
+      const port = safePort(m[1]);
+      if (port && !map[port]) map[port] = { container, dir, service: (service || '').trim() };
+    }
+  }
+  _dockerCache = { at: now, map, ok: o != null };
+  return map;
+}
+
 // For each given port, resolve the listening process's working dir + launch command
 // in whichever env dev servers run. Returns { [port]: { dir(host path), cmd, comm } }.
 async function resolveServerDirs(ports) {
+  const out = await resolveProcDirs(ports);
+  // Docker-published ports: the listener is Docker's port forwarder (or, on Windows,
+  // invisible to WSL entirely), so its cwd says nothing about the project. Ask Docker.
+  const misses = [...new Set((Array.isArray(ports) ? ports : []).map(safePort).filter(Boolean))]
+    .filter(p => !out[p] || !out[p].dir || out[p].dir === '/' || DOCKER_PROC_RE.test(out[p].comm || ''));
+  if (misses.length) {
+    const map = await dockerPorts();
+    for (const p of misses) {
+      const c = map[p];
+      if (c && c.dir) out[p] = { dir: c.dir, comm: c.service || c.container, cmd: `docker start ${c.container}`, docker: { container: c.container } };
+    }
+  }
+  return out;
+}
+async function resolveProcDirs(ports) {
   const uniq = [...new Set((Array.isArray(ports) ? ports : []).map(safePort).filter(Boolean))];
   if (!uniq.length) return {};
   const out = {};
@@ -2134,6 +2220,11 @@ function projectBlock(dir) {
   const lines = [PJ_START, '## Project (managed by Gamut Toolbox)', `You are working in the project **${name}**.`, `- Root: \`${dir}\``];
   if (branch) lines.push(`- Git branch: \`${branch}\``);
   if (m.repo && m.repo.remote) lines.push(`- Repo: ${m.repo.remote}`);
+  const linked = Array.isArray(m.linkedDirs) ? m.linkedDirs.filter(Boolean) : [];
+  if (linked.length) {
+    lines.push('- Linked folders (also part of this project — working in them is NOT new work, do not signal for them):');
+    for (const d of linked) lines.push(`  - \`${d}\``);
+  }
   if (servers.length) {
     lines.push('- Servers (how to run this project):');
     for (const s of servers) {
@@ -2373,7 +2464,19 @@ function dirInfo(dir) {
   const hasGit = fs.existsSync(path.join(dir, '.git'));
   let hasPkg = false, name = path.basename(String(dir).replace(/[\\/]+$/, ''));
   try { const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')); hasPkg = true; if (pkg.name) name = pkg.name; } catch (_) {}
-  return { hasGit, hasPkg, name, branch: hasGit ? gitBranchOf(dir) : '', remote: hasGit ? gitRemoteOf(dir) : '' };
+  return { hasGit, hasPkg, name, branch: hasGit ? gitBranchOf(dir) : '', remote: hasGit ? gitRemoteOf(dir) : '', gitRoot: gitRootOf(dir) };
+}
+// Nearest enclosing repo root ('' if none) — a server's cwd is usually a package
+// deep inside a monorepo, but linking a folder to a project should cover the repo.
+function gitRootOf(dir) {
+  let d = path.resolve(String(dir));
+  for (let i = 0; i < 64; i++) {
+    if (fs.existsSync(path.join(d, '.git'))) return d;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return '';
 }
 ipcMain.handle(IPC.DIR_INFO, (_, { dir } = {}) => dirInfo(dir));
 
