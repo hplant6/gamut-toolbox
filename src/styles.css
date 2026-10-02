@@ -239,14 +239,17 @@ html, body {
   border-radius: 0 0 var(--r-blob) 0; /* bottom-right blob */
   flex-shrink: 0;
 }
-#app-bar-logo img { height: 28px; width: auto; display: block; -webkit-app-region: no-drag; cursor: pointer; }   /* clickable → opens settings menu (window still draggable via the spacer) */
+/* White wordmark with a chromatic-aberration split (see #app-logo in index.html). Clickable → opens
+   the settings menu (window still draggable via the spacer). Offsets are SVG user units (~0.58px each). */
+#app-logo { display: block; height: 18px; width: auto; aspect-ratio: 156 / 31; overflow: visible; -webkit-app-region: no-drag; cursor: pointer; }
+#app-logo .ca-stack { isolation: isolate; }   /* the copies blend with each other, not the bar behind */
+#app-logo use { mix-blend-mode: screen; transition: transform 1.2s cubic-bezier(0.16, 1, 0.3, 1); }
+#app-logo.ca-on .ca-r { transform: translate(-2.6px, 0.4px); }
+#app-logo.ca-on .ca-b { transform: translate(2.6px, -0.4px); }
+#app-logo.ca-on:hover use { transform: none; transition-duration: 0.35s; }
+@media (prefers-reduced-motion: reduce) { #app-logo use { transition: none; } }
 #app-bar-logo #btn-settings { color: var(--spec-text-dim); margin-left: 0; width: 22px; min-width: 22px; height: 22px; border-radius: 3px; }   /* square hover seat, 3px corners */
 #app-bar-logo #btn-settings:hover { color: var(--spec-text); background: rgba(255,255,255,0.08); }
-#app-bar-logo img {
-  height: 100%;
-  width: auto;
-  display: block;
-}
 #app-bar-spacer { flex: 1; -webkit-app-region: drag; }
 /* Custom window controls — structural panel with a bottom-left blob, flush to the corner */
 #window-controls {

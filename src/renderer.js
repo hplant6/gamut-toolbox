@@ -4949,8 +4949,10 @@ gearBtn?.addEventListener('click', e => {
   ipcRenderer.send(IPC.SHOW_SETTINGS_MENU, { x: Math.round(rect.left), y: Math.round(rect.bottom) });
 });
 
+// Logo: ease the chromatic split in once the window has painted (CSS does the motion).
+requestAnimationFrame(() => setTimeout(() => document.getElementById('app-logo')?.classList.add('ca-on'), 250));
 // Clicking the Gamut Toolbox logo opens the same settings menu (anchored to the logo seat).
-document.querySelector('#app-bar-logo img')?.addEventListener('click', e => {
+document.getElementById('app-logo')?.addEventListener('click', e => {
   e.stopPropagation();
   const rect = document.getElementById('app-bar-logo').getBoundingClientRect();
   ipcRenderer.send(IPC.SHOW_SETTINGS_MENU, { x: Math.round(rect.left), y: Math.round(rect.bottom) });
