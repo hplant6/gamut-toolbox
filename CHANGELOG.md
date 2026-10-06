@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.17.1] - 2026-10-06
+
+### Changed
+- **New app logo.** The top-left logo is now the GAMUT wordmark over diagonal spectrum stripes. The chromatic-aberration intro animation is gone.
+- **Watch Approval and Localhost Servers use toggle switches** instead of plain checkboxes, and their Save and Done buttons are now the orange primary button like every other modal.
+- **The loading spinner and selected component cards follow your theme's accent colour** instead of always being orange.
+
+### Fixed
+- **The accent colour has a proper default again.** The stylesheet's orange accent referred to itself, so anything drawn before the theme loaded had no accent colour.
+- **In Custom Devices, the + Add button lines up with the name and size fields** and no longer crowds its label.
+
 ## [1.17.0] - 2026-10-02
 
 ### Added
