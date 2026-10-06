@@ -100,7 +100,7 @@
   --spec-text:         #BCBCBC;   /* primary (tab labels) */
   --spec-text-dim:     #817E89;   /* secondary (status, dropdown value) */
   --spec-text-faint:   #46434D;   /* tertiary (footer hint) */
-  --spec-accent:       var(--spec-accent);   /* primary accent (orange) — hover/active/send */
+  --spec-accent:       #FF5720;   /* primary accent (orange) — hover/active/send */
   --spec-accent-dark:  #4C2112;   /* darker orange (send-btn idle, etc.) — themeable: Accent 1 Alt */
   --mc-green:          #8EFFAE;   /* Mission Control: active/running (from Figma) */
   --mc-green-dark:     #22432C;   /* Mission Control: active card header bg */
@@ -310,49 +310,6 @@ html, body {
   background: var(--accent); box-shadow: 0 0 0 1.5px var(--bg-toolbar);
   pointer-events: none;
 }
-
-/* ════════════════════════════════════════════════════════════════
-   SETTINGS DROPDOWN
-   ════════════════════════════════════════════════════════════════ */
-
-#settings-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 8px;
-  width: 220px;
-  background: var(--bg-toolbar);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 4px;
-  box-shadow: 0 8px 24px var(--shadow-overlay);
-  z-index: 1000;
-  display: none;
-}
-#settings-menu.open { display: block; }
-
-.sm-item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 9px;
-  padding: 7px 10px;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--text);
-  font-size: 12px;
-  font-family: var(--font-ui);
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.1s;
-  white-space: nowrap;
-}
-.sm-item:hover { background: var(--btn-hover); }
-.sm-item svg { flex-shrink: 0; opacity: 0.7; }
-
-.sm-sep { height: 1px; background: var(--spec-header-bg); margin: 4px 0; }   /* shade 6 */
-
 
 /* ── Project switcher chip (app-bar, top-left) ───────────────────── */
 #project-switch { position: relative; display: flex; align-items: center; flex-shrink: 0; -webkit-app-region: no-drag; }
@@ -695,7 +652,6 @@ html, body {
 .lh-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .lh-filter { flex: 1; margin: 0; }
 .lh-showall { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 11px; color: var(--spec-text-dim); cursor: pointer; user-select: none; white-space: nowrap; }
-.lh-showall input { accent-color: var(--spec-accent); cursor: pointer; margin: 0; }
 .lh-list {
   max-height: 340px; overflow-y: auto; margin-bottom: 18px;
   background: var(--spec-black); border: 1px solid var(--spec-structural); border-radius: var(--radius-md);
@@ -863,7 +819,6 @@ html, body {
 /* Inline project-title rename (double-click the card title) */
 .mc-hd-title-edit { font-family: var(--font-title); font-weight: 600; font-size: 16px; letter-spacing: 0.06em; text-transform: uppercase; color: #fff; background: var(--spec-input-bg); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 6px; outline: none; width: 100%; box-sizing: border-box; }
 .budget-check { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--spec-text-dim); cursor: pointer; }
-.budget-check input { accent-color: var(--spec-accent); }
 .budget-flabel { font-size: 12px; color: var(--spec-text-dim); }
 /* Watch Approval modal: label above a full-width input */
 .wa-field { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 0; }
@@ -2403,7 +2358,7 @@ html, body {
 .im-ball {
   position: absolute; top: 11px; left: 11px;
   width: 6px; height: 6px; border-radius: 50%;
-  background: #FF5720;
+  background: var(--spec-accent);
   animation: im-juggle 1.8s linear infinite, im-glow 2.4s ease-in-out infinite;
 }
 .im-ball:nth-child(1) { animation-delay: -0.6s, 0s; }
@@ -2418,8 +2373,8 @@ html, body {
   87.5% { transform: translate(5px, -10px); }
 }
 @keyframes im-glow {
-  0%, 100% { box-shadow: 0 0 4px 1px rgba(255,87,32,0.5); }
-  50%      { box-shadow: 0 0 11px 3px rgba(255,87,32,0.9); }
+  0%, 100% { box-shadow: 0 0 4px 1px color-mix(in srgb, var(--spec-accent) 50%, transparent); }
+  50%      { box-shadow: 0 0 11px 3px color-mix(in srgb, var(--spec-accent) 90%, transparent); }
 }
 .im-progress {
   grid-column: 1 / -1;
@@ -2565,9 +2520,9 @@ html, body {
 #model-wrap { position: relative; flex-shrink: 0; }
 
 /* All HTML dropdown menus → shade-7 bg, shade-0 text, shade-5 row hover */
-#settings-menu, #figma-menu, #audit-menu, #profile-menu, #slash-menu, #persona-menu, #mode-menu { background: var(--spec-input-bg); border: none; }   /* shade 7 */
-.sm-item, .figma-menu-item, .audit-item, .profile-item, .slash-item, .persona-item { font-family: var(--font-mono); color: var(--spec-text); }   /* shade 0 */
-.sm-item:hover, .figma-menu-item:hover,
+#figma-menu, #audit-menu, #profile-menu, #slash-menu, #persona-menu, #mode-menu { background: var(--spec-input-bg); border: none; }   /* shade 7 */
+.figma-menu-item, .audit-item, .profile-item, .slash-item, .persona-item { font-family: var(--font-mono); color: var(--spec-text); }   /* shade 0 */
+.figma-menu-item:hover,
 .audit-item:hover, .profile-item:hover, .slash-item:hover, .persona-item:hover { background: var(--spec-toolbar-bg); color: var(--spec-text); }   /* shade 5 */
 
 /* ── Agent persona dropdown (composer) ── */
@@ -2825,10 +2780,10 @@ html, body {
 
 /* ROW view: stacked full-width shade-7 drawers, black separators; selected shows its preview */
 .comp-row .comp-item { background: var(--spec-input-bg); border-bottom: 1px solid var(--spec-header-bg); }
-.comp-row .comp-item.selected { background: rgba(255,87,32,0.10); }
+.comp-row .comp-item.selected { background: color-mix(in srgb, var(--spec-accent) 10%, transparent); }
 /* GRID view: 2-column; every card shows its preview */
 .comp-grid .comp-item { border: 1px solid transparent; border-radius: 12px; }
-.comp-grid .comp-item.selected { border-color: var(--spec-accent); background: rgba(255,87,32,0.10); }
+.comp-grid .comp-item.selected { border-color: var(--spec-accent); background: color-mix(in srgb, var(--spec-accent) 10%, transparent); }
 .comp-grid .comp-item-head { padding: 12px 12px 8px 0; }   /* titles flush left */
 
 .comp-loading { padding: 14px; font: 12px var(--font-mono); color: var(--spec-text-dim); }
@@ -4467,12 +4422,12 @@ html, body {
   color: var(--text-dim); cursor: pointer;
 }
 .dev-row-del:hover { background: var(--danger-dim); border-color: var(--danger); color: var(--danger); }
-.dev-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-.dev-add-row .modal-input { height: 32px; }
+.dev-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 20px; }
+.dev-add-row .modal-input { height: 32px; box-sizing: border-box; margin-bottom: 0; }   /* the row carries the spacing, so inputs line up with + Add */
 .dev-add-row #dev-add-name { flex: 1; }
 .dev-num { width: 64px; text-align: center; }
 .dev-x { color: var(--text-dim); font-size: 13px; }
-.dev-add-btn { width: auto; height: 32px; flex-shrink: 0; white-space: nowrap; }
+.dev-add-btn { width: auto; height: 32px; padding: 0 12px; margin-bottom: 0; flex-shrink: 0; white-space: nowrap; }   /* margin-bottom 0 keeps it level with the inputs */
 
 #browser-placeholder { flex: 1; background: var(--spec-header-bg); position: relative; }   /* shade 6 — shows in the 8px frame gaps around the rounded browser view */
 

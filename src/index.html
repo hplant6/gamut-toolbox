@@ -49,23 +49,6 @@
       </button>
     </div>
 
-    <!-- Settings dropdown -->
-    <div id="settings-menu">
-      <button class="sm-item" id="sm-api-key">
-        <svg width="15" height="15" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><g stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" fill="none"><circle cx="7" cy="7" r="4.25"/><path d="M10.25 10.25L16.25 16.25"/><path d="M7 5v4M5 7h4" opacity=".4"/></g></svg>
-        Switch LLM API Key
-      </button>
-      <button class="sm-item" id="sm-theme">
-        <svg width="15" height="15" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><g stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" fill="none"><circle cx="9" cy="9" r="7.25"/><path d="M9 1.75v2M9 14.25v2M1.75 9h2M14.25 9h2" opacity=".4"/><circle cx="9" cy="9" r="2.75"/></g></svg>
-        <span>Theme…</span>
-      </button>
-      <div class="sm-sep"></div>
-      <button class="sm-item" id="sm-new-window">
-        <svg width="15" height="15" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg"><g stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" fill="none"><rect x="1.75" y="4.75" width="10.5" height="8.5" rx="1.5"/><path d="M5.75 4.75V3.25A1.5 1.5 0 0 1 7.25 1.75h7.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H13.25" opacity=".5"/></g></svg>
-        New Window
-      </button>
-    </div>
-
     <!-- Drag region -->
     <div id="app-bar-spacer"></div>
 
@@ -1606,12 +1589,12 @@
       <p class="modal-desc">Dev servers (node, python, php…) listening on this machine — open one in the Browser, copy its URL, or kill a stray one. Tick <b>Show all</b> for every listening port.</p>
       <div class="lh-toolbar">
         <input id="lh-filter" class="modal-input lh-filter" placeholder="Filter by port or process…" spellcheck="false" autocomplete="off" />
-        <label class="lh-showall"><input type="checkbox" id="lh-showall" /> Show all</label>
+        <label class="lh-showall sb-check-row"><input type="checkbox" id="lh-showall" /><span class="sb-switch"><span class="sb-switch-knob"><span class="sb-switch-led"></span></span></span> Show all</label>
         <button id="lh-refresh" class="modal-btn-cancel">Refresh</button>
       </div>
       <div id="lh-list" class="lh-list"><div class="lh-empty">Scanning…</div></div>
       <div class="modal-actions">
-        <button class="modal-btn-cancel" id="lh-done">Done</button>
+        <button class="modal-btn-confirm" id="lh-done">Done</button>
       </div>
     </div>
   </div>
@@ -1623,7 +1606,7 @@
       <p class="modal-desc">Mirror risky tool-permission prompts to the Watch Approval phone/watch app, so you can approve or deny from your wrist. Runs alongside the in-app prompt — whichever you answer first wins. Needs the relay server running (see the watch-approval repo).</p>
 
       <div class="budget-section">
-        <label class="budget-check"><input type="checkbox" id="wa-enabled"/> <span>Enable Watch Approval</span></label>
+        <label class="budget-check sb-check-row"><input type="checkbox" id="wa-enabled"/><span class="sb-switch"><span class="sb-switch-knob"><span class="sb-switch-led"></span></span></span><span>Enable Watch Approval</span></label>
         <div class="wa-field">
           <label class="budget-flabel" for="wa-url">Relay URL</label>
           <input id="wa-url" class="modal-input" placeholder="http://localhost:8420" spellcheck="false" autocomplete="off"/>
@@ -1638,7 +1621,7 @@
 
       <div class="modal-actions">
         <button class="modal-btn-cancel" id="wa-test">Test connection</button>
-        <button class="modal-btn-cancel" id="wa-save">Save</button>
+        <button class="modal-btn-confirm" id="wa-save">Save</button>
       </div>
     </div>
   </div>
