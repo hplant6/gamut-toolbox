@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-10-21
+
+### Added
+- **Kubernetes dev clusters are tracked as servers.** A k3d cluster (for example one started with mono's `yarn local:up`) now shows as a single Mission Control row with all of its ports listed under it: the app's NodePort, the other NodePorts and every `kubectl port-forward`. It belongs to the project whose folder holds its checkout, preferring a branch-tracked project on the cluster's branch. Start runs `k3d cluster start`, waits for the pods and re-creates the port-forwards. Pause and project switches run `k3d cluster stop`, which keeps the cluster's data. A cluster row reads **DOCKER OFF** while Docker isn't running, and a refused start says why.
+- **Code blocks in agent replies have a copy button.** It copies just that block's code, not the whole message.
+- **Resume can show the other account's sessions.** A **Show N from other account** link lists them, tagged with that account's email.
+
+### Changed
+- **Resume only lists the signed-in Claude account's sessions.** Gamut now records which account was live when, and gives each session to the account that started it. The menu shows which account it's listing. Sessions from before this version, or from times Gamut wasn't running, still show for both accounts.
+- **Agents keep a project's code inside the project folder.** The project notes Gamut writes for agents now say that downloads and clones go under the project folder, and that the agent should clone a fresh copy instead of working in a checkout it finds elsewhere on the machine. In a brand-new project, the first repo you ask for is checked out into the project folder itself. If you point an agent at a folder outside the project, it records that folder as a linked folder, so the next session knows where the code is.
+- **Box and Lasso's Show/Hide Selection also hides the resize handles**, the frame and the size label.
+- **A repo cloned inside a project no longer asks to become its own project.** Repos cloned next to a project still ask.
+- **Gamut keeps `.cathode/` out of git with `.git/info/exclude`** instead of editing the repo's `.gitignore`.
+
+### Fixed
+- **Checking a repo out into a new, empty project no longer asks whether to track a new branch.** Gamut records the repo instead and writes the project notes again, since the repo's own `CLAUDE.md` replaces them.
+- **Stopping a k3d cluster's port from the Running menu stops the whole cluster** instead of only its load-balancer container.
+
 ## [1.17.1] - 2026-10-06
 
 ### Changed
