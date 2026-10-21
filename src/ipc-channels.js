@@ -26,6 +26,7 @@ const IPC = Object.freeze({
   SERVER_DETECT: 'server-detect',     // read a project's package.json scripts
   SERVER_LOG: 'server-log',           // captured stdout/stderr tail for a server
   SERVER_RAM: 'server-ram',           // per-server memory (RSS) by port
+  CLUSTERS_LIST: 'clusters-list',     // running k3d clusters (ports, forwards, worktree) — see src/clusters.js
   PROJECT_CAPTURE: 'project-capture', // snapshot the browser pane → project preview
   PROJECT_PREVIEW: 'project-preview', // path to a project's cached preview image
   SESSIONS_LIST: 'sessions-list',

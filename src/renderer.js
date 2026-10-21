@@ -835,7 +835,7 @@ function serverCwdFor(project, srv) {
   return root.replace(/[\\/]+$/, '') + (root.includes('\\') ? '\\' : '/') + c.replace(/^\.[\\/]/, '');
 }
 function serverStartArg(project, srv) {
-  return { id: srv.id, projectId: project.id, name: srv.name, cmd: srv.cmd, cwd: serverCwdFor(project, srv), port: srv.port, runIn: srv.runIn, docker: srv.docker || undefined };
+  return { id: srv.id, projectId: project.id, name: srv.name, cmd: srv.cmd, cwd: serverCwdFor(project, srv), port: srv.port, runIn: srv.runIn, docker: srv.docker || undefined, cluster: srv.cluster || undefined };
 }
 
 function getDefaultProfile() {
@@ -12807,6 +12807,38 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     }
     return best;
   }
+  // ── k3d clusters (src/clusters.js) ──
+  // Every port a tracked cluster owns — its NodePorts and port-forwards are the
+  // cluster's, never separate dev servers.
+  function clusterPortsOf(list = loadProjects()) {
+    const out = new Set();
+    list.forEach(p => (p.servers || []).forEach(s => ((s.cluster && s.cluster.ports) || []).forEach(x => out.add(+x.port))));
+    return out;
+  }
+  // The project a cluster belongs to: whoever already tracks it; else the project
+  // holding its worktree, preferring a branch-scoped one on the cluster's branch
+  // (Kindo names a cluster per branch).
+  function clusterOwner(c, list = loadProjects()) {
+    const has = list.find(p => (p.servers || []).some(s => s.cluster && s.cluster.name === c.name));
+    if (has || !c.worktree) return has || null;
+    const owners = list.filter(p => projectDirs(p).some(d => dirIn(c.worktree, d)));
+    return owners.find(p => p.branchScoped && p.branch && p.branch === c.branch)
+        || ownerOfDir(c.worktree, owners.filter(p => !p.branchScoped)) || null;
+  }
+  const clusterDef = (c) => ({ name: c.name, branch: c.branch || '', worktree: c.worktree || '', appPort: c.appPort, ports: c.ports, forwards: c.forwards });
+  // Add the cluster to its project, or refresh what we know of it. Its port-forwards
+  // are only visible while they run, so a scan that sees none keeps the stored ones —
+  // they're what Start re-creates.
+  function captureCluster(owner, c) {
+    const s = (owner.servers || []).find(x => x.cluster && x.cluster.name === c.name);
+    if (!s) { addServer(owner.id, { name: 'k3d · ' + c.name, cwd: c.worktree || '.', port: c.appPort, cluster: clusterDef(c) }); return true; }
+    const next = c.forwards.length ? clusterDef(c) : { ...clusterDef(c), ports: s.cluster.ports, forwards: s.cluster.forwards };
+    if (JSON.stringify(next) === JSON.stringify(s.cluster) && s.port === c.appPort) return false;
+    updateServer(owner.id, s.id, { cluster: next, port: c.appPort });
+    return true;
+  }
+  let clusterState = null;   // last CLUSTERS_LIST: { k3d, docker, clusters }
+
   function linkDir(projectId, dir) {
     if (!projectId || !dir) return;
     const clean = String(dir).replace(/[\\/]+$/, '');
@@ -12825,10 +12857,20 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
 
   async function adoptForeignServers(project) {
     if (!project || !project.rootDir) return;
+    // A running cluster of this project's, so a switch-away pauses it too.
+    try {
+      const cl = await ipcRenderer.invoke(IPC.CLUSTERS_LIST);
+      for (const c of (cl && cl.clusters) || []) {
+        if (!c.running || !c.appPort) continue;
+        const o = clusterOwner(c);
+        if (o && o.id === project.id) captureCluster(o, c);
+      }
+    } catch (_) {}
     let servers = [];
     try { ({ servers } = await ipcRenderer.invoke(IPC.LOCALHOST_SERVERS)); } catch (_) {}
     const ports = (servers || []).map(s => s.port);
     const known = new Set(((getProject(project.id) || project).servers || []).map(s => +s.port).filter(Boolean));
+    clusterPortsOf().forEach(p => known.add(p));
     const fresh = ports.filter(p => !known.has(+p));
     if (!fresh.length) return;
     let dirs = {};
@@ -12868,7 +12910,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         id: s.id, name: s.name,
         role: s.role || (/storybook/i.test(s.name || '') ? 'storybook' : undefined),
         cmd: s.cmd || '', cwd: s.cwd || '.', port: s.port || null,
-        runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined,
+        runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined, cluster: s.cluster || undefined,
       })),
     };
     ipcRenderer.invoke(IPC.MANIFEST_WRITE, { dir: project.rootDir, data }).catch(() => {});
@@ -12908,7 +12950,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
   function addServer(projectId, def) {
     updateProject(projectId, p => {
       p.servers = p.servers || [];
-      p.servers.push({ id: genId(), name: def.name || 'server', cmd: def.cmd || '', cwd: def.cwd || '.', port: def.port || null, runIn: def.runIn || 'wsl', role: def.role, autostart: !!def.autostart, docker: def.docker || undefined });
+      p.servers.push({ id: genId(), name: def.name || 'server', cmd: def.cmd || '', cwd: def.cwd || '.', port: def.port || null, runIn: def.runIn || 'wsl', role: def.role, autostart: !!def.autostart, docker: def.docker || undefined, cluster: def.cluster || undefined });
     });
   }
   // Pause a project's running servers (stop + flag) — used by the manual Pause
@@ -12925,7 +12967,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       const wasUp = s.port ? !!running[s.port] : false;
       // Stop by id whether or not we know a port — a server with no recorded port
       // used to be skipped entirely, so it survived the switch.
-      const r = await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id }).catch(() => null);
+      const r = await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id, cluster: s.cluster }).catch(() => null);
       const owned = !!(r && r.stopped);
       // Still listening → we didn't own it (agent-started): free the port directly.
       if (wasUp && !owned) await ipcRenderer.invoke(IPC.SERVER_KILL_PORT, { port: s.port }).catch(() => {});
@@ -12944,7 +12986,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     const start  = paused.length ? paused : servers.filter(s => s.autostart);
     let primary = 0;   // the port to show in the Browser (first web server we started)
     for (const s of start) {
-      if (!s.cmd && !s.docker) continue;
+      if (!s.cmd && !s.docker && !s.cluster) continue;
       const r = await ipcRenderer.invoke(IPC.SERVER_START, serverStartArg(project, s)).catch(() => null);
       const port = (r && r.ok && r.port) || s.port;
       if (port && port !== s.port) updateServer(project.id, s.id, { port });
@@ -12998,7 +13040,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       try { ({ manifest: m } = await ipcRenderer.invoke(IPC.MANIFEST_READ, { dir: p.rootDir })); } catch (_) {}
       if (m && Array.isArray(m.linkedDirs) && m.linkedDirs.length && !(p.linkedDirs && p.linkedDirs.length)) { p.linkedDirs = m.linkedDirs.slice(); changed = true; }
       if (m && Array.isArray(m.servers) && (!p.servers || !p.servers.length)) {
-        p.servers = m.servers.map(s => ({ id: s.id || genId(), name: s.name, role: s.role, cmd: s.cmd, cwd: s.cwd, port: s.port || null, runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined }));
+        p.servers = m.servers.map(s => ({ id: s.id || genId(), name: s.name, role: s.role, cmd: s.cmd, cwd: s.cwd, port: s.port || null, runIn: s.runIn || 'wsl', autostart: !!s.autostart, docker: s.docker || undefined, cluster: s.cluster || undefined }));
         changed = true;
       } else if (!m) {
         syncManifest(p);   // no manifest yet → migrate this project into its folder
@@ -13129,17 +13171,20 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       projects.forEach(p => (p.servers || []).forEach(s => { if (s.port) ports.push(s.port); }));
       let running = {};
       if (ports.length) { try { ({ running } = await ipcRenderer.invoke(IPC.SERVER_STATUS, { ports })); } catch (_) { return; } }
+      // Cluster rows need Docker; say so rather than plain INACTIVE (main caches the scan).
+      if (mcGrid.querySelector('.mc-row[data-cluster]')) { try { clusterState = await ipcRenderer.invoke(IPC.CLUSTERS_LIST); } catch (_) {} }
+      const dockerOff = !!(clusterState && clusterState.k3d && clusterState.docker === false);
       mcGrid.querySelectorAll('.mc-row').forEach(el => {
         const up = !!(el.dataset.port && running[el.dataset.port]);
         const startedAt = +el.dataset.starting || 0;
-        const starting = !up && startedAt && (Date.now() - startedAt < 30000);   // held ~30s max
+        const starting = !up && startedAt && (Date.now() - startedAt < (+el.dataset.startWindow || 30000));   // ~30s; a cluster gets minutes
         const paused = !up && !starting && el.dataset.paused === 'true';
         if (up || (startedAt && !starting)) el.dataset.starting = '';             // resolved (up) or timed out
         el.classList.toggle('up', up);
         el.classList.toggle('starting', starting);
         el.classList.toggle('paused', paused);
         const st = el.querySelector('.mc-row-state');
-        if (st) st.textContent = up ? 'ACTIVE' : (starting ? 'STARTING' : (paused ? 'PAUSED' : 'INACTIVE'));
+        if (st) st.textContent = up ? 'ACTIVE' : (starting ? 'STARTING' : (el.dataset.cluster && dockerOff ? 'DOCKER OFF' : (paused ? 'PAUSED' : 'INACTIVE')));
         // A server the user just started/resumed came up → load it in the browser
         // (leaving Mission Control open). No capture here: the pane is parked
         // behind this modal, so there'd be nothing to photograph. The preview is
@@ -13180,6 +13225,22 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       if (!mcGrid) return;
       const tracked = new Set();
       loadProjects().forEach(p => (p.servers || []).forEach(s => { if (s.port) tracked.add(+s.port); }));
+      clusterPortsOf().forEach(p => tracked.add(p));
+      // k3d clusters first, one server each — none of their ports may be mistaken for a
+      // stray dev server below. Unowned ones join the untracked list as a single entry.
+      const untrackedClusters = [];
+      try { clusterState = await ipcRenderer.invoke(IPC.CLUSTERS_LIST); } catch (_) { clusterState = null; }
+      let clustersChanged = false;
+      for (const c of (clusterState && clusterState.clusters) || []) {
+        c.ports.forEach(x => tracked.add(x.port));
+        if (!c.running || !c.appPort) continue;
+        const owner = clusterOwner(c);
+        if (owner) { clustersChanged = captureCluster(owner, c) || clustersChanged; continue; }
+        const info = { dir: c.worktree, comm: 'k3d · ' + c.name, cmd: '', cluster: clusterDef(c) };
+        untrackedClusters.push({ port: c.appPort, name: info.comm, info });
+        if (c.worktree) maybeAskServerProject(info, c.appPort);
+      }
+      if (clustersChanged && mcModal?.classList.contains('open')) renderMC();
       const found = new Map();   // port → process name
       try {   // listPorts: dev runtimes visible to the host (macOS, Windows-native)
         const r = await ipcRenderer.invoke(IPC.PORTS_LIST);
@@ -13212,7 +13273,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
           if (info && info.dir) maybeAskServerProject(info, port);   // Phase 3: offer to make it a project
         }
       }
-      renderUntracked(untracked.sort((a, b) => a.port - b.port));
+      renderUntracked(untrackedClusters.concat(untracked).sort((a, b) => a.port - b.port));
     }
 
     // Is `child` the same folder as, or nested inside, `parent`? Path-normalized
@@ -13293,7 +13354,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         linkDir(active.id, linkTo);
         refreshUntracked();
         const p = getProject(active.id);
-        if (p && !(p.servers || []).some(s => +s.port === port)) addServer(active.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: dir, port, runIn: 'wsl', docker: info.docker });
+        if (p && !(p.servers || []).some(s => +s.port === port)) addServer(active.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: dir, port, runIn: 'wsl', docker: info.docker, cluster: info.cluster });
       } });
       buttons.push({ label: 'Not a project', onPick: () => saveDecision(key, 'ignore') });
       askClassify({ question: `A dev server is running in “${(di && di.name) || nameFor(dir)}” (${dir}), not part of any project. Track it?`, buttons });
@@ -13462,6 +13523,16 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         '<span class="mc-row-acts"></span>';
       row.querySelector('.mc-row-name').textContent = s.name;
       row.querySelector('.mc-row-name').title = s.cmd || '';
+      if (s.cluster) {   // one row for the whole k3d cluster; its ports listed under the name
+        row.dataset.cluster = s.cluster.name;
+        const ports = (s.cluster.ports || []).map(x => `${x.name} ${x.port}`).join(' · ');
+        row.querySelector('.mc-row-name').textContent = 'k3d cluster';   // the 80px column; the full name rides the line below
+        const sub = document.createElement('div'); sub.className = 'mc-row-ports';
+        const nm = document.createElement('span'); nm.className = 'mc-row-ports-name'; nm.textContent = s.cluster.name;
+        sub.append(nm, document.createTextNode('  ' + ports));
+        row.appendChild(sub);
+        row.querySelector('.mc-row-name').title = `k3d cluster ${s.cluster.name}${s.cluster.branch ? ' (branch ' + s.cluster.branch + ')' : ''}\n${ports}`;
+      }
       row.querySelector('.mc-row-port').textContent = s.port || '';
       const acts = row.querySelector('.mc-row-acts');
       const arg = () => serverStartArg(p, s);
@@ -13473,22 +13544,29 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       const clearPaused = () => { updateServer(p.id, s.id, { paused: false }); s.paused = false; row.dataset.paused = ''; };
       const setPaused   = () => { updateServer(p.id, s.id, { paused: true });  s.paused = true;  row.dataset.paused = 'true'; };
       // Transitional "STARTING" state — held until the port comes up (refreshStatus) or times out.
+      // A cluster takes minutes (k3d start + pods + forwards), not seconds.
+      if (s.cluster) row.dataset.startWindow = String(6 * 60 * 1000);
+      // A refused start (Docker off, …) says why instead of quietly timing out.
+      const started = (r) => {
+        if (r && r.ok === false && r.error) { row.dataset.starting = ''; showToast(`${s.name}: ${r.error}`, { duration: 6000 }); refreshStatus(); return; }
+        capturePort(r);
+      };
       const markStarting = () => { row.dataset.starting = String(Date.now()); row.classList.add('starting'); const st = row.querySelector('.mc-row-state'); if (st) st.textContent = 'STARTING'; };
 
       const reload = document.createElement('button'); reload.className = 'mc-icn mc-row-reload'; reload.innerHTML = ICON_RELOAD; reload.title = 'Restart server';
-      reload.addEventListener('click', busy(async () => { markStarting(); capturePort(await ipcRenderer.invoke(IPC.SERVER_RESTART, arg()).catch(() => null)); clearPaused(); }));
+      reload.addEventListener('click', busy(async () => { markStarting(); started(await ipcRenderer.invoke(IPC.SERVER_RESTART, arg()).catch(() => null)); clearPaused(); }));
 
       const pause = document.createElement('button'); pause.className = 'mc-icn mc-row-pause'; pause.innerHTML = ICON_PAUSE; pause.title = 'Pause server';
       pause.addEventListener('click', busy(async () => {
-        if (row.dataset.paused === 'true') { markStarting(); row.dataset.openWhenUp = '1'; capturePort(await ipcRenderer.invoke(IPC.SERVER_START, arg()).catch(() => null)); clearPaused(); }   // resume
-        else { await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id }).catch(() => {}); setPaused(); }                                                             // pause
+        if (row.dataset.paused === 'true') { markStarting(); row.dataset.openWhenUp = '1'; started(await ipcRenderer.invoke(IPC.SERVER_START, arg()).catch(() => null)); clearPaused(); }   // resume
+        else { await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id, cluster: s.cluster }).catch(() => {}); setPaused(); }                                                             // pause
       }));
 
       const start = document.createElement('button'); start.className = 'mc-icn mc-row-start'; start.innerHTML = ICON_START; start.title = 'Start server';
-      start.addEventListener('click', busy(async () => { markStarting(); row.dataset.openWhenUp = '1'; capturePort(await ipcRenderer.invoke(IPC.SERVER_START, arg()).catch(() => null)); clearPaused(); }));
+      start.addEventListener('click', busy(async () => { markStarting(); row.dataset.openWhenUp = '1'; started(await ipcRenderer.invoke(IPC.SERVER_START, arg()).catch(() => null)); clearPaused(); }));
 
       const del = document.createElement('button'); del.className = 'mc-icn mc-row-del'; del.innerHTML = ICON_CLOSE; del.title = 'Remove server';
-      del.addEventListener('click', async () => { if (row.classList.contains('up')) await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id }).catch(() => {}); removeServer(p.id, s.id); renderMC(); });
+      del.addEventListener('click', async () => { if (row.classList.contains('up')) await ipcRenderer.invoke(IPC.SERVER_STOP, { id: s.id, cluster: s.cluster }).catch(() => {}); removeServer(p.id, s.id); renderMC(); });
 
       // Autostart — start this server on a cold switch into the project (when there's
       // nothing running to restore). Persisted to the manifest, so it travels on export.

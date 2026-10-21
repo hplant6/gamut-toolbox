@@ -39,6 +39,7 @@ const { getAnimationScript }      = require('./src/animation-inject');
 const { getMoveScript }           = require('./src/move-inject');
 const { getSlidersRuntime }       = require('./src/sliders-inject');
 const sliders                     = require('./src/sliders');
+const { createClusters }          = require('./src/clusters');
 const injectStyles                = require('./src/inject-styles');
 const { cssSnippet: animCss, jsSnippet: animJs, summaryFor: animSummary, emitCode: animEmit, ANIM_FRAMEWORKS } = require('./src/animation-spec');
 const ANIM_FW_LABEL = Object.fromEntries(ANIM_FRAMEWORKS.map(f => [f[0], f[1]]));
@@ -1621,7 +1622,9 @@ function detectRunIn(cwd) {
   })();
 }
 
-async function startProjectServer({ id, projectId, name, cmd, cwd, port, runIn, docker } = {}) {
+async function startProjectServer({ id, projectId, name, cmd, cwd, port, runIn, docker, cluster } = {}) {
+  // A k3d cluster: `k3d cluster start` + its port-forwards, run in the background (minutes).
+  if (cluster) return clusters.start(id, cluster);
   // A container is started by Docker, not by us — there's no process to own or log.
   if (docker && docker.container) {
     if (!DOCKER_NAME_RE.test(docker.container)) return { ok: false, error: 'invalid container name' };
@@ -1680,6 +1683,9 @@ async function killPort(port) {
   // A container's port: stop the container. Killing the port's owner here would take
   // down Docker Desktop's backend (Windows/macOS) or docker-proxy, not the server.
   const c = (await dockerPorts())[p];
+  // A k3d load balancer's port: stopping just that container would strand the rest of
+  // the cluster half-up, so stop the cluster (data kept) and its port-forwards.
+  if (c && c.k3d) { await clusters.stop('port:' + p, { name: c.k3d }); _dockerCache.at = 0; return { ok: true }; }
   if (c && DOCKER_NAME_RE.test(c.container)) {
     await dockerExec(['stop', c.container], 30000);
     _dockerCache.at = 0;
@@ -1737,8 +1743,13 @@ function detectServers(dir) {
 }
 
 ipcMain.handle(IPC.SERVER_START,   (_, def) => startProjectServer(def || {}));
-ipcMain.handle(IPC.SERVER_STOP,    (_, { id } = {}) => stopProjectServer(id));
-ipcMain.handle(IPC.SERVER_RESTART, async (_, def) => { stopProjectServer(def && def.id); await new Promise(r => setTimeout(r, 400)); return startProjectServer(def || {}); });
+ipcMain.handle(IPC.SERVER_STOP,    (_, { id, cluster } = {}) => cluster ? clusters.stop(id, cluster) : stopProjectServer(id));
+ipcMain.handle(IPC.SERVER_RESTART, async (_, def) => {
+  if (def && def.cluster) await clusters.stop(def.id, def.cluster);
+  else stopProjectServer(def && def.id);
+  await new Promise(r => setTimeout(r, 400));
+  return startProjectServer(def || {});
+});
 ipcMain.handle(IPC.SERVER_STATUS,  async (_, { ports } = {}) => {
   const running = {};
   await Promise.all((Array.isArray(ports) ? ports : []).map(async p => { const sp = safePort(p); if (sp) running[sp] = await probePort(sp); }));
@@ -1778,7 +1789,7 @@ ipcMain.on(IPC.BROWSER_SUGGEST_SPACE, (_, { height } = {}) => {
 });
 
 ipcMain.handle(IPC.SERVER_DETECT,  (_, { dir } = {}) => detectServers(dir));
-ipcMain.handle(IPC.SERVER_LOG,     (_, { id } = {}) => { const i = projectServers.get(id); return { log: (i && i.log) || '', status: (i && i.status) || 'never started' }; });
+ipcMain.handle(IPC.SERVER_LOG,     (_, { id } = {}) => { const i = projectServers.get(id) || clusters.op(id); return { log: (i && i.log) || '', status: (i && i.status) || 'never started' }; });
 
 // ── Attribute running servers to a project by working directory ──
 // Convert a WSL path (/mnt/c/…) to its Windows host form so it can be matched
@@ -1826,7 +1837,7 @@ function runNixCaptureStdin(script, timeoutMs = 6000) {
 // and cache briefly (refreshUntracked polls). A missing Docker costs one probe per 30s.
 const DOCKER_PROC_RE = /^(com\.docker\.|docker|vpnkit|dockerd)/i;   // Docker's own port forwarders — never ours to kill
 const DOCKER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-const DOCKER_FMT = '{{.Names}}\t{{.Ports}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}';
+const DOCKER_FMT = '{{.Names}}\t{{.Ports}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}\t{{.Label "k3d.cluster"}}';
 const DOCKER_HOST_BINS = IS_WIN_HOST ? ['docker']
   : ['docker', '/usr/local/bin/docker', '/opt/homebrew/bin/docker', '/Applications/Docker.app/Contents/Resources/bin/docker'];
 let _dockerRunner = null;                 // { kind: 'host', bin } | { kind: 'nix' }
@@ -1855,19 +1866,37 @@ async function dockerExec(args, timeout) {
   }
   return null;
 }
-// { [hostPort]: { container, dir (host path), service } } for running containers.
+// Like runNixCapture, but for long scripts: streams each output line and resolves to
+// the exit code (-1 on spawn error or timeout).
+function runNixLong(script, onLine, timeoutMs = 600000) {
+  return new Promise((resolve) => {
+    let buf = '', done = false;
+    const fin = (code) => { if (done) return; done = true; if (buf) onLine(buf); resolve(code); };
+    try {
+      const p = platform.nixSpawn(['bash', '-lc', script], { windowsHide: true });
+      const feed = (d) => { buf += d; const ls = buf.split('\n'); buf = ls.pop(); ls.forEach(l => l && onLine(l)); };
+      p.stdout?.on('data', feed); p.stderr?.on('data', feed);
+      p.on('close', (code) => fin(code == null ? -1 : code)); p.on('error', () => fin(-1));
+      setTimeout(() => { try { p.kill(); } catch (_) {} fin(-1); }, timeoutMs);
+    } catch (_) { fin(-1); }
+  });
+}
+const clusters = createClusters({ runNix: runNixCapture, runNixLong, toHost: wslToHost, toNix: platform.toWslPath, probePort });
+ipcMain.handle(IPC.CLUSTERS_LIST, () => clusters.scan().catch(() => ({ ok: false, clusters: [] })));
+
+// { [hostPort]: { container, dir (host path), service, k3d } } for running containers.
 async function dockerPorts() {
   const now = Date.now();
   if (now - _dockerCache.at < (_dockerCache.ok ? 5000 : 30000)) return _dockerCache.map;
   const map = {};
   const o = await dockerExec(['ps', '--format', DOCKER_FMT], 6000);
   for (const ln of String(o || '').split('\n')) {
-    const [container, ports, wd, service] = ln.split('\t');
+    const [container, ports, wd, service, k3d] = ln.split('\t');
     if (!container || !ports) continue;
     const dir = wslToHost((wd || '').trim());
     for (const m of ports.matchAll(/:(\d+)->\d+\/tcp/g)) {
       const port = safePort(m[1]);
-      if (port && !map[port]) map[port] = { container, dir, service: (service || '').trim() };
+      if (port && !map[port]) map[port] = { container, dir, service: (service || '').trim(), k3d: (k3d || '').trim() };
     }
   }
   _dockerCache = { at: now, map, ok: o != null };

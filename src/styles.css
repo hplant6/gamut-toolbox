@@ -455,6 +455,9 @@ html, body {
 .mc-row-state { font-family: var(--font-mono); font-weight: 900; font-size: 12px; text-transform: uppercase; color: var(--spec-text-dim); }
 .mc-row.up .mc-row-state { color: var(--mc-green); }
 .mc-row-name, .mc-row-port { font-family: var(--font-mono); font-weight: 700; font-size: 12px; color: var(--spec-text-dim); }
+/* a k3d cluster's name + ports: a full-width line under its row */
+.mc-row-ports { grid-column: 2 / -1; margin-top: -6px; font: 400 10px/1.5 var(--font-mono); color: var(--spec-text-faint); }
+.mc-row-ports-name { font-weight: 700; color: var(--spec-text-dim); }
 .mc-row.up .mc-row-name, .mc-row.up .mc-row-port { color: #fff; }
 .mc-row.paused .mc-row-dot { background: var(--mc-amber); }
 .mc-row.paused .mc-row-state { color: var(--mc-amber); }
