@@ -749,6 +749,7 @@ function cathodeCombinedPage(OPTS) {
       const host = document.createElement('div');
       host.id = '__cathode_rz__';
       host.style.cssText = 'position:fixed;inset:0;pointer-events:none;overflow:visible;z-index:' + Z.OVERLAY + ';';
+      if (window.__cathodeSelHidden !== false) host.style.display = 'none';   // follows Show/Hide Selection, which starts hidden
       const box = document.createElement('div');
       box.style.cssText = 'position:absolute;box-sizing:border-box;pointer-events:none;border:1.5px solid ' + ACC + ';' +
         'box-shadow:0 0 14px 2px rgba(' + ACC_RGB + ',0.45),0 0 30px 6px rgba(' + ACC_RGB + ',0.22);';
@@ -812,7 +813,7 @@ function cathodeCombinedPage(OPTS) {
       phost.innerHTML = '';
       items.forEach((item, i) => {
         if (active && active.indexOf(i) === -1) return;
-        if (rz && rz.i === i) return;   // the resize box replaces the ants for the focused element
+        if (rz && rz.i === i && rz.host.style.display !== 'none') return;   // the resize box replaces the ants for the focused element, unless it's hidden
         const b = pBox(item);
         if (b) phost.appendChild(b);
       });
@@ -858,6 +859,7 @@ function cathodeCombinedPage(OPTS) {
       // Last finished handle drag, for main's poll. Handed over once, so a restarted poll
       // can't replay an old drag (and re-tick a row the user has since unticked).
       sizeState() { const d = rzDone; rzDone = null; return d; },
+      redraw() { pDraw(this.active); },   // Show/Hide Selection flipped the resize box, so the focused element's ants swap with it
       // Live-edit a selected element from the left-column panel.
       // `state` is '' for the element's resting style, or a pseudo-class name
       // ('hover' / 'focus' / 'active' / 'disabled') that the panel is currently forcing

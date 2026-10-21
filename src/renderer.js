@@ -3946,14 +3946,22 @@ function renderRichText(container, text) {
   let last = 0, m;
   while ((m = FENCE.exec(text)) !== null) {
     if (m.index > last) appendBlocks(container, text.slice(last, m.index).replace(/\n$/, ''));
+    // The wrapper holds the language label + copy button, so they stay pinned while the
+    // <pre> scrolls sideways.
+    const wrap = document.createElement('div');
+    wrap.className = 'acp-code-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'acp-code-bar';
+    if (m[1].trim()) { const lbl = document.createElement('span'); lbl.className = 'acp-code-lang'; lbl.textContent = m[1].trim(); bar.appendChild(lbl); }
     const pre = document.createElement('pre');
     pre.className = 'acp-code';
-    if (m[1].trim()) { const lbl = document.createElement('span'); lbl.className = 'acp-code-lang'; lbl.textContent = m[1].trim(); pre.appendChild(lbl); }
     const codeEl = document.createElement('code');
     const code = m[2].replace(/\n$/, '');
     codeEl.textContent = code;   // styled plain fallback until (or unless) Monaco colorizes
     pre.appendChild(codeEl);
-    container.appendChild(pre);
+    bar.appendChild(codeCopyButton(code));
+    wrap.append(pre, bar);
+    container.appendChild(wrap);
     jobs.push({ codeEl, code, lang: fenceToLang(m[1]) });
     last = FENCE.lastIndex;
   }
@@ -3968,6 +3976,34 @@ function renderRichText(container, text) {
       }
     });
   }
+}
+
+// Copy button for one fenced block: copies just that block's raw code (not the
+// colorized markup), and stops the click reaching the bubble's copy-whole-message.
+function codeCopyButton(code) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'acp-code-copy';
+  btn.title = 'Copy code';
+  btn.setAttribute('aria-label', 'Copy code');
+  btn.innerHTML = COPY_ICON;
+  let resetTimer = null;
+  btn.addEventListener('mousedown', e => e.preventDefault());   // keep text selection
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(code).then(() => {
+      btn.textContent = 'COPIED';
+      btn.classList.add('copied');
+      btn.title = 'Copied';
+      clearTimeout(resetTimer);
+      resetTimer = setTimeout(() => {
+        btn.innerHTML = COPY_ICON;
+        btn.classList.remove('copied');
+        btn.title = 'Copy code';
+      }, 1300);
+    }).catch(() => {});
+  });
+  return btn;
 }
 
 function acpFinalizeStream(s) {
@@ -5466,6 +5502,7 @@ let openBudgetModal = null;
   const menu = document.getElementById('resume-menu');
   if (!btn || !menu) return;
   let data = null, busy = false;
+  let allAccounts = false;   // off again on every open, so the list never silently stays mixed
 
   const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const usd = n => '$' + (n < 0.01 ? n.toFixed(4) : n < 1 ? n.toFixed(3) : n.toFixed(2));
@@ -5487,13 +5524,26 @@ let openBudgetModal = null;
     return '';
   }
 
-  // Scrollable list (no filter for now — the whole grouped list is shown).
+  // Scrollable list (no filter for now — the whole grouped list is shown). Main only
+  // returns the live account's sessions; the line above the list says whose they are.
+  const acctEl = el('div', 'rs-acct');
   const listEl = el('div', 'rs-list');
-  menu.append(listEl);
+  menu.append(acctEl, listEl);
 
   function renderList() {
     const q = '';
     listEl.innerHTML = '';
+    acctEl.textContent = '';
+    if (data && data.ok && data.account) {
+      acctEl.append(el('span', 'rs-acct-email', data.account));
+      if (data.otherAccount) {
+        const t = el('button', 'rs-acct-toggle', allAccounts ? 'Hide other account' : `Show ${data.otherAccount} from other account`);
+        t.type = 'button';
+        t.addEventListener('click', e => { e.stopPropagation(); allAccounts = !allAccounts; scan(); });
+        acctEl.append(t);
+      }
+    }
+    acctEl.hidden = !acctEl.childNodes.length;
     if (busy && !data) { listEl.appendChild(el('div', 'lh-empty', 'Scanning…')); return; }
     if (!data || !data.ok) { listEl.appendChild(el('div', 'lh-empty', 'Could not read transcripts.')); return; }
     const projects = data.projects
@@ -5511,7 +5561,9 @@ let openBudgetModal = null;
         info.appendChild(el('div', 'rs-title', s.title));
         const bits = [relTime(s.lastTs), s.messages + ' msg', usd(s.cost)];
         if (modelShort(s.model)) bits.push(modelShort(s.model));
-        info.appendChild(el('div', 'rs-sub', bits.filter(Boolean).join('  ·  ')));
+        const sub = el('div', 'rs-sub', bits.filter(Boolean).join('  ·  '));
+        if (s.account) { row.classList.add('other-account'); sub.prepend(el('span', 'rs-other-acct', s.account)); }   // started under the other login
+        info.appendChild(sub);
         row.title = 'Resume: ' + s.title;
         row.addEventListener('click', () => { close(); resumeSession(s); });
         row.append(info, el('span', 'rs-go', 'Resume'));
@@ -5523,11 +5575,11 @@ let openBudgetModal = null;
 
   async function scan() {
     busy = true; renderList();
-    try { data = await ipcRenderer.invoke(IPC.SESSIONS_LIST); }
+    try { data = await ipcRenderer.invoke(IPC.SESSIONS_LIST, { allAccounts }); }
     catch (_) { data = { ok: false }; }
     finally { busy = false; renderList(); }
   }
-  function open()  { menu.classList.add('open'); btn.classList.add('active'); data = null; scan(); }
+  function open()  { menu.classList.add('open'); btn.classList.add('active'); data = null; allAccounts = false; scan(); }
   function close() { menu.classList.remove('open'); btn.classList.remove('active'); }
   btn.addEventListener('click', e => { e.stopPropagation(); menu.classList.contains('open') ? close() : open(); });
   document.addEventListener('click', e => { if (menu.classList.contains('open') && !wrap.contains(e.target)) close(); });
@@ -13295,6 +13347,14 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
           },
           onStay:   () => { saveDecision(key, 'keep'); },
         });
+      } else if (t.reason === 'link') {
+        // The agent worked in a folder outside the project because the user pointed it
+        // there — record it, so the project block lists it for every later session.
+        const p = loadProjects().find(x => pNorm(x.rootDir) === pNorm(t.projectDir));
+        if (!p || projectDirs(p).some(d => dirIn(t.gitRoot || t.dir, d))) return;
+        linkDir(p.id, t.gitRoot || t.dir);
+        refreshUntracked();
+        showToast(`Linked ${t.gitRoot || t.dir} to ${p.name}`, { duration: 4000 });
       } else if (t.reason === 'repo') {
         const key = decisionKey(t.dir);
         if (promptedThisSession.has(key) || loadDecisions()[key] || isKnownProject(t.dir)) return;

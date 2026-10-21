@@ -695,6 +695,18 @@ html, body {
 }
 #resume-menu.open { display: block; }
 .rs-list { max-height: 340px; overflow-y: auto; }
+.rs-acct { display: flex; align-items: baseline; gap: 8px; padding: 2px 8px 6px; margin-bottom: 4px; border-bottom: 1px solid var(--spec-structural); }
+.rs-acct[hidden] { display: none; }
+.rs-acct-email { flex: 1; min-width: 0; font: 10px var(--font-mono); color: var(--spec-text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rs-acct-toggle {   /* text link — reset the bare-button 28×28 icon default */
+  flex-shrink: 0; width: auto; height: auto; padding: 0; border: none; background: none;
+  font: 9px var(--font-mono); color: var(--spec-text-faint); cursor: pointer;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.rs-acct-toggle:hover { color: var(--spec-text); background: none; }
+.rs-other-acct { margin-right: 6px; padding: 0 4px; border-radius: 3px; background: var(--spec-structural); color: var(--spec-text-dim); }
+.rs-row.other-account .rs-title { color: var(--spec-text-dim); }
+.rs-row.other-account .rs-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* the tag mustn't wrap the line */
 .rs-group + .rs-group { margin-top: 2px; }
 .rs-group-head {
   display: flex; align-items: baseline; gap: 8px; padding: 8px 8px 4px;
@@ -1568,9 +1580,10 @@ html, body {
 }
 .acp-cmd-note::before { content: '✓ '; color: var(--success); font-style: normal; }
 /* Fenced code blocks in chat replies (Monaco-colorized; falls back to plain-but-styled) */
+.acp-code-wrap { position: relative; margin: 8px 0; }
 .acp-code {
   position: relative;
-  margin: 8px 0;
+  margin: 0;
   padding: 10px 12px;
   background: var(--spec-black);              /* shade 8 — matches the code viewer */
   border: 1px solid var(--spec-structural);  /* shade 3 */
@@ -1582,12 +1595,35 @@ html, body {
   color: var(--spec-text);
 }
 .acp-code code { font-family: inherit; white-space: pre; background: none; border: none; padding: 0; }
+.acp-code-bar {
+  position: absolute; top: 4px; right: 1px;   /* flush with the border, so no code peeks past it */
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 5px 0 6px; border-radius: 3px;
+  background: var(--spec-black);             /* the label + button sit over code that scrolls under them */
+}
 .acp-code-lang {
-  position: absolute; top: 4px; right: 8px;
   font-family: var(--font-title); font-stretch: 112.5%;
   font-size: 8px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--spec-text-faint);             /* shade 2 */
   pointer-events: none; user-select: none;
+}
+/* Copy button: faint until the block is hovered; flips to the green COPIED badge like .acp-msg-copy */
+.acp-code-copy {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+  border: none; border-radius: 3px;
+  background: var(--spec-black);             /* sits over code that scrolls under it */
+  color: var(--spec-text-dim);
+  opacity: 0; cursor: pointer;
+  font: 900 11px/1 var(--font-mono); letter-spacing: 0.04em; white-space: nowrap;
+  transition: opacity 0.15s ease, color 0.12s;
+}
+.acp-code-wrap:hover .acp-code-copy,
+.acp-code-copy:focus-visible { opacity: 1; }
+.acp-code-copy:hover { color: var(--spec-text); background: var(--spec-black); }   /* kill the global button:hover bg */
+.acp-code-copy.copied {
+  opacity: 1; width: auto; padding: 2px 6px;
+  background: #22432C; color: #8EFFAE;
 }
 /* `inline code` chips */
 .acp-inline-code {
