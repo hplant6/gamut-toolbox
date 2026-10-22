@@ -7388,7 +7388,7 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   function paintToggleSel(visible) {
     if (!toggleSelBtn) return;
     toggleSelBtn.innerHTML = visible ? EYE_HIDE_SVG : EYE_SHOW_SVG;
-    toggleSelBtn.title = visible ? 'Hide selection outline on the page' : 'Show selection outline on the page';
+    toggleSelBtn.title = visible ? 'Hide selection outline and resize handles on the page' : 'Show selection outline and resize handles on the page';
     toggleSelBtn.setAttribute('aria-label', toggleSelBtn.title);
   }
 
@@ -7587,8 +7587,11 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     return 'text';
   }
 
+  // Padding/Margin side lock (18-lock / 18-lock-open-2).
+  const LOCK_ICON = '<svg viewBox="0 0 18 18" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M5.75,8.25v-3.25c0-1.795,1.455-3.25,3.25-3.25h0c1.795,0,3.25,1.455,3.25,3.25v3.25"/><line x1="9" y1="11.75" x2="9" y2="12.75"/><rect x="3.25" y="8.25" width="11.5" height="8" rx="2" ry="2"/></svg>';
+  const LOCK_OPEN_ICON = '<svg viewBox="0 0 18 18" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M7.25,8.25v-3.25c0-1.795-1.455-3.25-3.25-3.25h0c-1.795,0-3.25,1.455-3.25,3.25v1.25"/><line x1="9.5" y1="11.75" x2="9.5" y2="12.75"/><rect x="3.75" y="8.25" width="11.5" height="8" rx="2" ry="2"/></svg>';
   // Drag-scrubber handle for numeric fields (drag left ↓ / right ↑).
-  const SLIDE_ICON = '<svg width="13" height="13" viewBox="0 0 18 18" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12.7549 5.50488C13.0283 5.23151 13.4718 5.23151 13.7451 5.50488L16.7451 8.50488C17.0185 8.77824 17.0185 9.22174 16.7451 9.49511L13.7451 12.4951C13.4718 12.7685 13.0283 12.7685 12.7549 12.4951C12.4815 12.2217 12.4815 11.7782 12.7549 11.5049L15.2598 8.99999L12.7549 6.49511C12.4815 6.22174 12.4815 5.77824 12.7549 5.50488Z"/><path d="M4.25489 5.50488C4.52826 5.23151 4.97176 5.23151 5.24513 5.50488C5.51849 5.77824 5.51849 6.22174 5.24513 6.49511L2.74024 8.99999L5.24513 11.5049C5.51849 11.7782 5.51849 12.2217 5.24513 12.4951C4.97176 12.7685 4.52826 12.7685 4.25489 12.4951L1.25489 9.49511C0.981524 9.22174 0.981524 8.77824 1.25489 8.50488L4.25489 5.50488Z"/><path d="M16.25 8.29979C16.6366 8.29979 16.9502 8.61339 16.9502 8.99998C16.9502 9.38658 16.6366 9.70018 16.25 9.70018H1.75C1.3634 9.70018 1.0498 9.38658 1.0498 8.99998C1.0498 8.61339 1.3634 8.29979 1.75 8.29979H16.25Z"/></svg>';
+  const SLIDE_ICON ='<svg width="13" height="13" viewBox="0 0 18 18" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M12.7549 5.50488C13.0283 5.23151 13.4718 5.23151 13.7451 5.50488L16.7451 8.50488C17.0185 8.77824 17.0185 9.22174 16.7451 9.49511L13.7451 12.4951C13.4718 12.7685 13.0283 12.7685 12.7549 12.4951C12.4815 12.2217 12.4815 11.7782 12.7549 11.5049L15.2598 8.99999L12.7549 6.49511C12.4815 6.22174 12.4815 5.77824 12.7549 5.50488Z"/><path d="M4.25489 5.50488C4.52826 5.23151 4.97176 5.23151 5.24513 5.50488C5.51849 5.77824 5.51849 6.22174 5.24513 6.49511L2.74024 8.99999L5.24513 11.5049C5.51849 11.7782 5.51849 12.2217 5.24513 12.4951C4.97176 12.7685 4.52826 12.7685 4.25489 12.4951L1.25489 9.49511C0.981524 9.22174 0.981524 8.77824 1.25489 8.50488L4.25489 5.50488Z"/><path d="M16.25 8.29979C16.6366 8.29979 16.9502 8.61339 16.9502 8.99998C16.9502 9.38658 16.6366 9.70018 16.25 9.70018H1.75C1.3634 9.70018 1.0498 9.38658 1.0498 8.99998C1.0498 8.61339 1.3634 8.29979 1.75 8.29979H16.25Z"/></svg>';
 
   // Route a native <select> through the app's shared custom dropdown, compactly.
   function compactSelect(sel, isUnit) {
@@ -7608,8 +7611,11 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   if (footEl) footEl._onSendModeChange = updateSendCount;   // the count has to survive a mode change
 
   // ── one property as a field card with a typed control ─────────
-  function buildField(row, i, p) {
+  // linked: further property names this one control also drives (the locked
+  // Padding/Margin "All" row) — every edit and include-toggle applies to them too.
+  function buildField(row, i, p, linked = []) {
     const mods = modsOf(row), checked = checkedOf(row);
+    const names = [p.name, ...linked];
     // In a forced state the row shows what that state resolves to, not the resting value.
     const shown = stateValue(row, p.name, p.value);
     const cur = mods[p.name] !== undefined ? mods[p.name] : shown;
@@ -7622,17 +7628,19 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     const sel = el('button', 'pp-field-sel'); sel.title = 'Include in message';
     sel.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (checked.has(p.name)) { checked.delete(p.name); field.classList.remove('selected'); }
-      else { checked.add(p.name); field.classList.add('selected'); }
+      if (checked.has(p.name)) { names.forEach(n => checked.delete(n)); field.classList.remove('selected'); }
+      else { names.forEach(n => checked.add(n)); field.classList.add('selected'); }
       updateSendCount();
     });
     const label = el('span', 'pp-field-label', labelFor(p.name)); label.title = p.name;
     const ctrl  = el('div', 'pp-field-ctrl');
 
     function commit(v) {
-      mods[p.name] = v;
-      checked.add(p.name);
-      applyStyle(i, p.name, v, row.state);
+      names.forEach(n => {
+        mods[n] = v;
+        checked.add(n);
+        applyStyle(i, n, v, row.state);
+      });
       field.dataset.val = v;
       field.classList.add('selected', 'modified');
       updateSendCount();
@@ -8044,22 +8052,44 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   // A four-sided box section (Padding, Margin) — one row per side, always shown even at
   // 0, since a side that's currently 0 is exactly the one you came here to set. Serialized
   // CSS omits zero sides, so any missing side is seeded before it's rendered.
+  // The lock folds the four sides into one "All" control; it's held per element and
+  // per section, so it survives the drawer rebuilding (e.g. a state switch).
   function buildSideSection(row, i, title, prefix) {
     const SIDES = [['top', 'Top'], ['right', 'Right'], ['bottom', 'Bottom'], ['left', 'Left']];
+    const locks = (row.boxLock ||= {});
+    const locked = !!locks[prefix];
     const sec = el('div', 'pp-section pp-box-sec');
     sec.dataset.section = title;
-    sec.appendChild(el('div', 'pp-section-title', title));
-    SIDES.forEach(([side, short]) => {
-      const name = prefix + '-' + side;
+    const head = el('div', 'pp-section-title pp-box-head', title);
+    const lock = el('button', 'pp-box-lock' + (locked ? ' on' : ''));
+    lock.type = 'button';
+    lock.innerHTML = locked ? LOCK_ICON : LOCK_OPEN_ICON;
+    lock.title = locked ? `Unlock — set each side's ${prefix} separately` : `Lock — one value for all four sides`;
+    lock.setAttribute('aria-label', lock.title);
+    lock.setAttribute('aria-pressed', String(locked));
+    lock.addEventListener('click', (e) => {
+      e.stopPropagation();
+      locks[prefix] = !locked;
+      sec.replaceWith(buildSideSection(row, i, title, prefix));
+    });
+    head.appendChild(lock);
+    sec.appendChild(head);
+    const propFor = (name) => {
       let p = (row.item.cssProps || []).find(x => x.name === name);
       if (!p) { p = { name, value: '0px' }; (row.item.cssProps = row.item.cssProps || []).push(p); }
-      // Identical control to width/height (buildField → ctrlLength: knob slider +
-      // numeric input + unit dropdown); just relabel to the side.
-      const field = buildField(row, i, p);
+      return p;
+    };
+    // Identical control to width/height (buildField → ctrlLength: knob slider +
+    // numeric input + unit dropdown); just relabel to the side.
+    const add = (p, short, linked) => {
+      const field = buildField(row, i, p, linked);
       const lbl = field.querySelector('.pp-field-label');
-      if (lbl) { lbl.textContent = short; lbl.title = name; }
+      if (lbl) { lbl.textContent = short; lbl.title = linked ? prefix : p.name; }
       sec.appendChild(field);
-    });
+    };
+    // Locked: one row seeded from Top; the first edit sets all four sides to it.
+    if (locked) add(propFor(prefix + '-top'), 'All', SIDES.slice(1).map(([side]) => prefix + '-' + side));
+    else SIDES.forEach(([side, short]) => add(propFor(prefix + '-' + side), short));
     return sec;
   }
 
@@ -12735,7 +12765,25 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
 
   // Make a project active: persist, point the agent cwd at it, reflect in the chip.
   function activateProject(dir, name) {
-    const entry = registerProject(dir, name);
+    activateEntry(registerProject(dir, name));
+  }
+  // Activate an already-registered project by id. Branch-scoped projects share their
+  // rootDir with the base project, so activateProject(rootDir) would resolve back to
+  // the base one — anything holding an entry goes through here instead.
+  function activateProjectById(id) {
+    if (!getProject(id)) return;
+    updateProject(id, p => { p.lastActiveAt = Date.now(); });
+    activateEntry(getProject(id));
+  }
+  // Move the chat you're looking at into a project — used when a "new project?" prompt
+  // is accepted, since that chat is the one doing the new work.
+  function adoptActiveSession(projectId) {
+    const s = sessions.get(activeId);
+    if (!s || s.transient || !projectId) return;
+    s.projectId = projectId;
+    saveOpenSessions();
+  }
+  function activateEntry(entry) {
     if (!entry) return;
     const leaving = getActiveId();
     const switching = leaving !== entry.id;
@@ -12889,7 +12937,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     saveProjects(list);
     if (getActiveId() === id) {
       const next = list.slice().sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0))[0];
-      if (next) activateProject(next.rootDir);
+      if (next) activateProjectById(next.id);
       else { setActiveId(''); ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: '' }); updateChip(); }
     }
     renderMenu();
@@ -13078,7 +13126,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       item.title = p.rootDir;
       item.addEventListener('click', (ev) => {
         if (ev.target.closest('.ps-item-remove')) return;
-        activateProject(p.rootDir); closeMenu();
+        activateProjectById(p.id); closeMenu();
       });
       item.querySelector('.ps-item-remove').addEventListener('click', (ev) => {
         ev.stopPropagation(); removeProject(p.id);
@@ -13317,9 +13365,11 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     }
 
     // Turn a folder into a tracked project (repo remote/branch prefilled into the manifest).
-    function adoptDirAsProject(dir, info) {
+    // moveChat: the agent asked for this project, so switch to it and bring its chat along.
+    function adoptDirAsProject(dir, info, moveChat = false) {
       const entry = registerProject(dir, (info && info.name) || undefined);
       if (entry && info && info.remote) updateProject(entry.id, p => { p.repo = { remote: info.remote, branch: info.branch }; });
+      if (entry && moveChat) { adoptActiveSession(entry.id); activateProjectById(entry.id); }
       renderMenu();
     }
     // A new branch tracked as its own project — folder is shared, so it's localStorage-only
@@ -13327,9 +13377,13 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     function createBranchProject(t, name) {
       const id = projId(t.dir) + '#' + t.branch;
       const list = loadProjects();
-      if (list.some(p => p.id === id)) return;
-      list.push({ id, name: (name || '').trim() || `${nameFor(t.dir)} (${t.branch})`, rootDir: t.dir, branch: t.branch, branchScoped: true, repo: t.remote ? { remote: t.remote, branch: t.branch } : undefined, lastActiveAt: Date.now() });
-      saveProjects(list); renderMenu();
+      if (!list.some(p => p.id === id)) {
+        list.push({ id, name: (name || '').trim() || `${nameFor(t.dir)} (${t.branch})`, rootDir: t.dir, branch: t.branch, branchScoped: true, repo: t.remote ? { remote: t.remote, branch: t.branch } : undefined, lastActiveAt: Date.now() });
+        saveProjects(list);
+      }
+      // Switch to it and bring the chat along — that chat is doing the branch's work.
+      adoptActiveSession(id); activateProjectById(id);
+      renderMenu();
     }
 
     // Trigger: a dev server running in an unknown, project-ish folder.
@@ -13404,7 +13458,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
           onCreate: (picked) => {
             saveDecision(key, 'project');
             if (onBranch) createBranchProject({ ...t, branch: t.branch }, picked);
-            else adoptDirAsProject(t.dir, { ...t, name: picked });
+            else adoptDirAsProject(t.dir, { ...t, name: picked }, true);
           },
           onStay:   () => { saveDecision(key, 'keep'); },
         });
@@ -13900,7 +13954,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       card.appendChild(meta);
       const foot = document.createElement('div'); foot.className = 'mc-foot';
       const sw = document.createElement('button'); sw.className = 'mc-btn mc-btn-switch'; sw.textContent = 'Switch to project';
-      sw.addEventListener('click', () => { activateProject(p.rootDir); renderMC(); });
+      sw.addEventListener('click', () => { activateProjectById(p.id); renderMC(); });
       foot.append(footMenuBtn(p), sw);
       card.appendChild(foot);
       return card;
@@ -13951,7 +14005,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
 
   // Init: adopt the saved active project; else seed from the legacy/Storybook dir.
   const existing = activeProject();
-  if (existing) { activateProject(existing.rootDir); }
+  if (existing) { activateProjectById(existing.id); }
   else {
     let seed = '';
     try { seed = (typeof sbConfig !== 'undefined' && sbConfig && sbConfig.projectDir) || localStorage.getItem(LS.projectDir) || ''; } catch (_) {}

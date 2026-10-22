@@ -811,9 +811,12 @@ function cathodeCombinedPage(OPTS) {
 
     function pDraw(active) {
       phost.innerHTML = '';
+      // Hide Selection means a clean view of the element (e.g. judging a colour edit):
+      // no ants either, not just no resize box. Same starts-hidden rule as rzAttach.
+      if (window.__cathodeSelHidden !== false) return;
       items.forEach((item, i) => {
         if (active && active.indexOf(i) === -1) return;
-        if (rz && rz.i === i && rz.host.style.display !== 'none') return;   // the resize box replaces the ants for the focused element, unless it's hidden
+        if (rz && rz.i === i) return;   // the resize box replaces the ants for the focused element
         const b = pBox(item);
         if (b) phost.appendChild(b);
       });
@@ -859,7 +862,7 @@ function cathodeCombinedPage(OPTS) {
       // Last finished handle drag, for main's poll. Handed over once, so a restarted poll
       // can't replay an old drag (and re-tick a row the user has since unticked).
       sizeState() { const d = rzDone; rzDone = null; return d; },
-      redraw() { pDraw(this.active); },   // Show/Hide Selection flipped the resize box, so the focused element's ants swap with it
+      redraw() { pDraw(this.active); },   // Show/Hide Selection flipped: outlines follow the resize box on or off
       // Live-edit a selected element from the left-column panel.
       // `state` is '' for the element's resting style, or a pseudo-class name
       // ('hover' / 'focus' / 'active' / 'disabled') that the panel is currently forcing
