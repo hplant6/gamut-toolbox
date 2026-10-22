@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-10-22
+
+### Added
+- **Padding and Margin can be locked to one value.** A lock button in each section's title folds Top, Right, Bottom and Left into a single **All** control that sets all four sides at once. Unlock to set the sides separately again. Each selected element remembers its own locks.
+
+### Changed
+- **Accepting a "new project?" prompt switches to the new project and takes your chat with it.** This covers new branches and projects an agent proposes. The chat keeps its conversation.
+- **Box and Lasso's Hide Selection now hides the marching-ants outline too**, leaving the element itself with nothing drawn over it.
+
+### Fixed
+- **Branch projects can be selected.** Picking one in the project switcher or Mission Control, or reopening Gamut with one active, used to select the main project in the same folder instead.
+- **The project switcher menu no longer opens underneath a chat's pinned message.**
+
 ## [1.18.0] - 2026-10-21
 
 ### Added

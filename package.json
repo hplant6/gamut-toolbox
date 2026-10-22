@@ -1,6 +1,6 @@
 {
   "name": "gamut-toolbox",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "description": "Split chat + browser dev tool for AI coding agents",
   "//": "zod has no direct imports — it satisfies @agentclientprotocol/sdk peerDependency. Do not remove.",
   "author": "hplan",
