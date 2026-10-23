@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-10-22
+
+### Fixed
+- **Full-page export captures the whole page on chat apps and dashboards.** Pages that scroll inside a pane rather than the window used to export only what was on screen, whatever the settings. The pane is now expanded to its full length for the capture, then put back where it was.
+- **Project screenshots in Mission Control are taken again.** Switching between branch projects in the same folder never took one. A screenshot is now also taken shortly after one of the active project's pages finishes loading in the Browser, at most once a minute.
+- **The "Switching to…" banner sits over the Views bar** instead of spilling off the right edge of the left column.
+- **Servers removed from a branch project stay removed.** They were refilled from the main project's settings or the folder's `package.json` on the next start.
+
 ## [1.19.0] - 2026-10-22
 
 ### Added
