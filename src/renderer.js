@@ -12819,8 +12819,10 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       // else they were browsing is left alone.
       const leavingPorts = from ? new Set((from.servers || []).map(x => +x.port).filter(Boolean)) : new Set();
       const showing = browserLocalPort();
+      // Last look at this project while its server is still up — branch projects sharing
+      // a root too (they each have their own preview, just not their own servers).
+      if (from) await captureProjectPreview(from.id);
       if (from && !sharedRoot) {
-        await captureProjectPreview(from.id);   // last look at this project while its server is still up
         await pauseProjectServers(from);
         if (showing && leavingPorts.has(showing)) ipcRenderer.send(IPC.BROWSER_NAVIGATE, 'about:blank');
       }
@@ -12989,6 +12991,17 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     updateProject(projectId, x => { x.hasPreview = true; });
     return true;
   }
+  // Switching away and closing Mission Control are rare — someone can work in one
+  // project for days. So also refresh the preview whenever one of the active project's
+  // own pages finishes loading in the Browser: settled a moment, at most once a minute.
+  let _previewLoadTimer = null, _previewLastAt = 0;
+  ipcRenderer.on(IPC.BROWSER_LOADING, (_, state) => {
+    clearTimeout(_previewLoadTimer);
+    if (state !== 'done' || Date.now() - _previewLastAt < 60000) return;
+    _previewLoadTimer = setTimeout(async () => {
+      if (await captureProjectPreview(getActiveId())) _previewLastAt = Date.now();
+    }, 2500);
+  });
   function updateServer(projectId, sid, patch) {
     updateProject(projectId, p => { const s = (p.servers || []).find(x => x.id === sid); if (s) Object.assign(s, patch); });
   }
@@ -13064,13 +13077,16 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
   }
 
   // Seed a project's servers from its package.json scripts (once, if none defined).
+  // Once: a project the user has emptied stays empty (serversSeeded), rather than getting
+  // the package.json guesses back on every start.
   async function seedServers(project) {
-    if (!project || (project.servers && project.servers.length)) return;
+    if (!project || project.serversSeeded || (project.servers && project.servers.length)) return;
     try {
       const r = await ipcRenderer.invoke(IPC.SERVER_DETECT, { dir: project.rootDir });
       if (r && r.servers && r.servers.length) {
         updateProject(project.id, p => {
           if (!p.servers || !p.servers.length) p.servers = r.servers.slice(0, 5).map(s => ({ id: genId(), name: s.name, cmd: s.cmd, port: s.port || null, autostart: true }));
+          p.serversSeeded = true;
         });
       }
     } catch (_) {}
@@ -13083,7 +13099,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     const list = loadProjects();
     let changed = false;
     for (const p of list) {
-      if (!p.rootDir) continue;
+      if (!p.rootDir || p.branchScoped) continue;   // a shared folder's manifest is the base project's, not its branches'
       let m = null;
       try { ({ manifest: m } = await ipcRenderer.invoke(IPC.MANIFEST_READ, { dir: p.rootDir })); } catch (_) {}
       if (m && Array.isArray(m.linkedDirs) && m.linkedDirs.length && !(p.linkedDirs && p.linkedDirs.length)) { p.linkedDirs = m.linkedDirs.slice(); changed = true; }

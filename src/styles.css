@@ -4874,6 +4874,8 @@ button:active { background: var(--btn-active); }
 /* The z-index:1 above makes each child a stacking context, which traps #project-menu's
    own z-index — lift the switcher over the chat overlays (sticky header, perm stack). */
 #views-bar > #project-switch { z-index: 100; }
+/* …and the switch banner must stay an absolute overlay of the whole bar, not a flex item. */
+#views-bar > #switch-banner { position: absolute; z-index: 101; }
 #views-label {
   font-family: var(--font-title);
   font-size: 12px; font-weight: 600; letter-spacing: 0.06em;

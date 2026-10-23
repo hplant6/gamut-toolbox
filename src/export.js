@@ -57,6 +57,56 @@ async function metrics(t) {
   })()`);
 }
 
+// App-shell pages (chat UIs, dashboards) never scroll the window — the document is exactly
+// one viewport tall and the content scrolls inside a pane. A full-page capture of those is
+// just the screen. So when the window doesn't scroll, find the main scroll pane (the largest
+// visible one) and let it and every ancestor up to <html> grow to the pane's content height:
+// the document becomes as tall as the content and the window-based capture below works as-is.
+// Returns an async undo; a no-op when the window already scrolls or no pane is found.
+const UNCLIP_CSS =
+  'html[data-gamut-unclip],body[data-gamut-unclip]{height:auto!important;max-height:none!important;overflow:visible!important}' +
+  '[data-gamut-unclip]{height:auto!important;max-height:none!important;overflow:visible!important;contain:none!important}' +
+  '[data-gamut-unclip="pinned"]{bottom:auto!important}' +
+  '[data-gamut-unclip="pane"]{flex-basis:auto!important;flex-shrink:0!important}';
+async function unclip(t) {
+  const did = await t.exec(`(() => {
+    const d = document.documentElement;
+    if (Math.max(d.scrollHeight, document.body ? document.body.scrollHeight : 0) > innerHeight + 2) return false;
+    let pane = null, best = 0;
+    for (const el of document.body ? document.body.getElementsByTagName('*') : []) {
+      if (el.scrollHeight <= el.clientHeight + 20) continue;
+      const oy = getComputedStyle(el).overflowY;
+      if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') continue;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+      if (w * h > best) { best = w * h; pane = el; }
+    }
+    if (!pane || best < innerWidth * innerHeight * 0.1) return false;
+    pane.dataset.gamutUnclipTop = pane.scrollTop;
+    for (let el = pane; el; el = el.parentElement) {
+      const p = getComputedStyle(el).position;
+      el.setAttribute('data-gamut-unclip', el === pane ? 'pane' : (p === 'fixed' || p === 'absolute') ? 'pinned' : '');
+    }
+    let s = document.getElementById('__gamut_export_unclip__');
+    if (!s) { s = document.createElement('style'); s.id = '__gamut_export_unclip__'; (document.head || d).appendChild(s); }
+    s.textContent = ${JSON.stringify(UNCLIP_CSS)};
+    return true;
+  })()`);
+  if (!did) return async () => {};
+  await sleep(60);   // let layout (and any resize observers) catch up
+  return async () => {
+    try {
+      await t.exec(`(() => {
+        document.getElementById('__gamut_export_unclip__')?.remove();
+        document.querySelectorAll('[data-gamut-unclip]').forEach(el => el.removeAttribute('data-gamut-unclip'));
+        const pane = document.querySelector('[data-gamut-unclip-top]');
+        if (pane) { pane.scrollTop = +pane.dataset.gamutUnclipTop; delete pane.dataset.gamutUnclipTop; }
+      })()`);
+    } catch (_) {}
+  };
+}
+
 // Temporary page CSS for the capture: hide our overlays and the scrollbars, freeze motion.
 // Returns an async undo.
 async function applyCleanup(t, { hideOverlays = true, hideScrollbars = true, pauseAnimations = false } = {}) {
@@ -159,7 +209,9 @@ async function capture(t, opts = {}, { isCancelled, onProgress } = {}) {
   const byScreen = full && (opts.method === 'scroll' || !t.usesCdp);
   const before = await metrics(t);
   const undoCleanup = await applyCleanup(t, opts);
+  let undoUnclip = async () => {};
   try {
+    if (full) undoUnclip = await unclip(t);
     if (full && !byScreen && opts.lazyLoad) await loadLazyContent(t, opts.maxHeight || 20000, { isCancelled, onProgress: (p) => onProgress && onProgress('lazyload', p) });
     check();
     const m = await metrics(t);   // after cleanup + lazy load: the page may have grown
@@ -171,6 +223,7 @@ async function capture(t, opts = {}, { isCancelled, onProgress } = {}) {
     const height = res.height || (full ? Math.min(m.ch, maxH) : m.vh);
     return { width: m.vw, height, truncated: full && res.pageHeight > maxH, cdp: t.usesCdp, title: m.title, url: m.url, scale: res.scale, tiles: res.tiles };
   } finally {
+    await undoUnclip();
     await undoCleanup();
     try { await t.exec(`window.scrollTo(${before.sx}, ${before.sy})`); } catch (_) {}
   }
@@ -265,7 +318,9 @@ async function preview(t, px = 360, maxHeight = 20000, { reveal = false } = {}) 
   let m = await metrics(t);
   if (!t.usesCdp) return { width: m.vw, height: m.vh, full: false, data: (await t.capturePage()).resize({ width: px }).toPNG().toString('base64'), metrics: m };
   const undo = await applyCleanup(t, { hideOverlays: true, hideScrollbars: true });
+  const undoUnclip = await unclip(t);
   try {
+    m = { ...(await metrics(t)), sx: m.sx, sy: m.sy };   // unclipped: the page may now be taller
     if (reveal) {
       // Brief settle per screen: the dialog is waiting on this. Script-driven fades may show part-way.
       for (let y = 0; y < Math.min(m.ch, maxHeight); y += m.vh) { await t.exec(`window.scrollTo(0, ${y})`); await settle(t, 150); }
@@ -281,6 +336,7 @@ async function preview(t, px = 360, maxHeight = 20000, { reveal = false } = {}) 
       return { width: m.vw, height, full: true, data: r.data, metrics: m };
     } finally { try { await t.cdp('Emulation.clearDeviceMetricsOverride'); } catch (_) {} }
   } finally {
+    await undoUnclip();
     await undo();
     try { await t.exec(`window.scrollTo(${m.sx}, ${m.sy})`); } catch (_) {}
   }
