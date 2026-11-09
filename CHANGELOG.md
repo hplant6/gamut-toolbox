@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-11-09
+
+### Added
+- **New projects start in the chat.** Creating a project, or accepting an agent's "new project?" prompt, clears the Browser and gives the chat the full window while there's nothing to look at yet. When the agent posts a link, or a server starts in the project's folder, the chat asks whether to open it. **Open browser** slides the Browser back in with the page already loaded. **Not yet** keeps you in the chat, and the BROWSER tab on the side strip pulses until you open it.
+
+### Changed
+- **Storybook links always open in the Storybook panel**, from the chat, the address bar or Mission Control. A link to a story opens that story. If you've removed the Storybook tab, they open in the Browser as before.
 ## [1.19.1] - 2026-10-22
 
 ### Fixed
