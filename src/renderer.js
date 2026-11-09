@@ -3853,6 +3853,12 @@ function fenceToLang(fence) {
 // bubble's copy-on-click. Trailing sentence punctuation / markdown emphasis
 // (e.g. a **bolded** URL's closing "**", or a sentence-final ".") is kept as text.
 const CHAT_URL_RE = /https?:\/\/[^\s<>]+/g;
+// A localhost URL on a registered Storybook instance's port (sync check; main also
+// probes unregistered ports before routing — see routeToStorybook in main.js).
+function isKnownStorybookUrl(url) {
+  const m = /^https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)/i.exec(url || '');
+  return !!m && (typeof sbInstances !== 'undefined') && sbInstances.some(i => +i.port === +m[1]);
+}
 function appendLinkified(container, plain) {
   let last = 0, m;
   CHAT_URL_RE.lastIndex = 0;
@@ -3871,6 +3877,9 @@ function appendLinkified(container, plain) {
       e.preventDefault();
       e.stopPropagation();                          // don't trigger the bubble's copy-on-click
       ipcRenderer.send(IPC.BROWSER_NAVIGATE, url);
+      // A known Storybook's link is routed to the Storybook panel by main (which then
+      // sends STORYBOOK_SHOW) — don't flash the browser tab first.
+      if (isKnownStorybookUrl(url)) return;
       // Surface the browser so the page is actually visible: if a non-browser view tab
       // (Storybook / Code / Console / Changes) is active, switch to the browser tab…
       const cur = tabsConfig.find(t => t.id === activeViewTabId);
@@ -13019,7 +13028,14 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       const ports = [...new Set(fresh.map(portOf))];
       let running = {};
       try { ({ running } = await ipcRenderer.invoke(IPC.SERVER_STATUS, { ports })); } catch (_) {}
-      const url = fresh.find(u => running && running[portOf(u)]);
+      let url = null;
+      for (const u of fresh.filter(u => running && running[portOf(u)])) {
+        // A Storybook isn't "your app" — its links go to the Storybook panel instead.
+        let sb = false;
+        try { sb = await ipcRenderer.invoke(IPC.STORYBOOK_IS_PORT, { port: portOf(u) }); } catch (_) {}
+        if (sb) { cfOffered.add(p.id + '|' + u); continue; }
+        url = u; break;
+      }
       if (url && getActiveId() === p.id && getProject(p.id)?.chatFirst) offerReveal(p, url);
     } finally { cfBusy = false; }
   }
@@ -14521,6 +14537,16 @@ ipcRenderer.on(IPC.SB_BAR_MENU_ACTION, (_, action) => {
 });
 document.getElementById('sb-back')?.addEventListener('click', () => { sbSetupOpen = false; renderSbTab(); });
 
+// Main routed a Storybook link to the panel — bring the Storybook tab forward (and
+// out of chat-only mode). No Storybook tab in the bar → open it in the Browser instead.
+ipcRenderer.on(IPC.STORYBOOK_SHOW, (_, { url } = {}) => {
+  const t = tabsConfig.find(x => x.type === 'storybook');
+  if (!t) { ipcRenderer.send(IPC.BROWSER_NAVIGATE, { url, raw: true }); return; }
+  sbSetupOpen = false;
+  if (activeViewTabId !== t.id) activateViewTab(t.id);
+  renderSbTab();
+  if (panelCollapsed && activePane === 'chat') userSetPane(null);
+});
 ipcRenderer.on(IPC.STORYBOOK_INSTANCES, (_, { instances, activeId } = {}) => {
   sbInstances = instances || [];
   sbActiveId  = activeId;

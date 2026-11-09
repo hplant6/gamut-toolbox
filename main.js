@@ -3792,8 +3792,54 @@ ipcMain.handle(IPC.GET_NOUS_CREDITS, async () => {
 });
 
 // ── IPC: browser ──────────────────────────────────────────────────
-ipcMain.on(IPC.BROWSER_NAVIGATE, (_, url) => {
-  let target = (url || '').trim();
+// Storybook links always open in the Storybook panel, never the Browser. Every
+// app-driven navigation (chat links, address bar, Mission Control, project switch)
+// comes through BROWSER_NAVIGATE, so this is the one place to route them. A port is
+// Storybook if it's a registered instance, or its /iframe.html actually mentions
+// Storybook — status alone isn't enough, since an SPA dev server answers 200 to any
+// path. Probe results are cached briefly (a port can change hands).
+const sbProbeCache = new Map();   // port → { at, yes }
+function isStorybookPort(port) {
+  if ([...sbServers.values()].some(s => s.port === port)) return Promise.resolve(true);
+  const hit = sbProbeCache.get(port);
+  if (hit && Date.now() - hit.at < 30000) return Promise.resolve(hit.yes);
+  return new Promise((resolve) => {
+    let body = '', done = false;
+    const finish = (yes) => { if (done) return; done = true; sbProbeCache.set(port, { at: Date.now(), yes }); resolve(yes); };
+    const req = http.get(`http://localhost:${port}/iframe.html`, (r) => {
+      if (!r.statusCode || r.statusCode >= 400) { r.resume(); return finish(false); }
+      r.setEncoding('utf8');
+      r.on('data', (c) => { body += c; if (/storybook/i.test(body)) { req.destroy(); finish(true); } else if (body.length > 65536) { req.destroy(); finish(false); } });
+      r.on('end', () => finish(/storybook/i.test(body)));
+    });
+    req.on('error', () => finish(false));
+    req.setTimeout(800, () => { req.destroy(); finish(false); });
+  });
+}
+async function routeToStorybook(target) {
+  let u; try { u = new URL(target); } catch (_) { return false; }
+  if (!/^(localhost|127\.0\.0\.1)$/i.test(u.hostname)) return false;
+  const port = safePort(u.port || 80);
+  if (port === null || !(await isStorybookPort(port))) return false;
+  let inst = [...sbServers.values()].find(s => s.port === port);
+  const viewLive = storybookView && !storybookView.webContents.isDestroyed();
+  if (!inst || activeSbId !== inst.id || !viewLive) inst = adoptPort(port);   // registers/activates → loads its root
+  if (!inst) return false;
+  const root = inst.url.replace(/\/+$/, ''), want = target.replace(/\/+$/, '');
+  if (want !== root && storybookView && !storybookView.webContents.isDestroyed()) storybookView.webContents.loadURL(target).catch(() => {});
+  uiSend(IPC.STORYBOOK_SHOW, { url: target });   // renderer switches to the Storybook tab
+  return true;
+}
+
+ipcMain.handle(IPC.STORYBOOK_IS_PORT, async (_, { port } = {}) => { const p = safePort(port); return p !== null && await isStorybookPort(p); });
+
+let navSeq = 0;   // the Storybook probe is async — only the latest navigation may land
+ipcMain.on(IPC.BROWSER_NAVIGATE, async (_, url) => {
+  // { url, raw: true } skips Storybook routing (the renderer's fallback when the
+  // Storybook tab has been removed from the tab bar).
+  const raw = !!(url && typeof url === 'object' && url.raw);
+  let target = String((url && typeof url === 'object' ? url.url : url) || '').trim();
+  const seq = ++navSeq;
   // about:blank must not be scheme-prefixed into "https://about:blank"
   if (!target || target === 'about:blank') {
     browserView.webContents.loadURL('about:blank').catch(() => {});
@@ -3803,6 +3849,8 @@ ipcMain.on(IPC.BROWSER_NAVIGATE, (_, url) => {
     const isLocal = /^localhost(:\d+)?(\/|$)|^127\.|^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./.test(target);
     target = (isLocal ? 'http://' : 'https://') + target;
   }
+  if (!raw && await routeToStorybook(target)) return;
+  if (seq !== navSeq) return;   // a newer navigation superseded this one while probing
   browserView.webContents.loadURL(target).catch(() => {});
 });
 ipcMain.on(IPC.SET_BROWSER_EMPTY, (_, empty) => {

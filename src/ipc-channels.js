@@ -253,6 +253,8 @@ const IPC = Object.freeze({
   STORYBOOK_SETUP_OPEN: 'storybook-setup-open',
   STORYBOOK_SHOW_SETUP: 'storybook-show-setup',
   STORYBOOK_WRITE_MEMORY: 'storybook-write-memory',
+  STORYBOOK_IS_PORT: 'storybook-is-port',         // renderer → main: is this localhost port a Storybook?
+  STORYBOOK_SHOW: 'storybook-show',               // main → renderer: a Storybook link was routed to the panel; show its tab
   SYSPERF: 'sysperf',
   SYSPERF_ACTIVE: 'sysperf-active',
   TAB_TITLE_UPDATED: 'tab-title-updated',
