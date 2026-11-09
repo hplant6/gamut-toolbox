@@ -3879,7 +3879,7 @@ function appendLinkified(container, plain) {
         if (proj) activateViewTab(proj.id);
       }
       // …and if the chat is filling the pane (single-pane chat), restore the split.
-      if (panelCollapsed && activePane === 'chat') setSinglePane(null);
+      if (panelCollapsed && activePane === 'chat') userSetPane(null);   // user opened it → also ends a chat-first project's chat-only mode
     });
     container.appendChild(a);
     if (trail) container.appendChild(document.createTextNode(trail));
@@ -4013,6 +4013,7 @@ function acpFinalizeStream(s) {
     const text = (s.streamTextEl ? s.streamTextEl.textContent : '').trim();
     if (text) {
       addReplyMeta(s, bubble, text);
+      window.__cfScan?.(s, text);   // chat-first project: a posted localhost URL may be ready to show
       // Re-render when there's something to format: code fences, inline code, a bare
       // URL (linkified), or a GFM table.
       if (s.streamTextEl && (/```|`[^`\n]+`|https?:\/\//.test(text) || HAS_TABLE_RE.test(text))) renderRichText(s.streamTextEl, text);
@@ -4861,13 +4862,19 @@ function setSinglePane(pane) {
 }
 
 // << toggles between the split view and single-pane (browser by default).
-btnPanelToggle.addEventListener('click', () => setSinglePane(panelCollapsed ? null : 'browser'));
+// Pane changes made by hand. A chat-first new project stops being chat-first once the
+// user opens the Browser themselves (window.__cfUserPane, set up with the projects).
+function userSetPane(pane) {
+  setSinglePane(pane);
+  window.__cfUserPane?.(pane === 'chat');
+}
+btnPanelToggle.addEventListener('click', () => userSetPane(panelCollapsed ? null : 'browser'));
 // Border close buttons collapse the split view into single-pane browser.
-document.querySelectorAll('.border-close').forEach(b => b.addEventListener('click', () => setSinglePane('browser')));
+document.querySelectorAll('.border-close').forEach(b => b.addEventListener('click', () => userSetPane('browser')));
 // Collapsed-strip tabs swap which pane fills the main area (full-width), staying collapsed.
-document.querySelectorAll('.cn-label').forEach(b => b.addEventListener('click', () => setSinglePane(b.dataset.pane === 'chat' ? 'chat' : 'browser')));
+document.querySelectorAll('.cn-label').forEach(b => b.addEventListener('click', () => userSetPane(b.dataset.pane === 'chat' ? 'chat' : 'browser')));
 // Strip "open" button (>>) returns to the original two-column split.
-document.getElementById('btn-open-strip')?.addEventListener('click', () => setSinglePane(null));
+document.getElementById('btn-open-strip')?.addEventListener('click', () => userSetPane(null));
 
 // ── Settings dropdown ─────────────────────────────────────────────
 // ── Custom window controls (frameless titlebar) ──────────────────
@@ -12795,6 +12802,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     if (window.__diffPoke) window.__diffPoke();   // Changes follows the active project
     if (window.__slidersProjectChanged) window.__slidersProjectChanged();   // pinned Sliders panel follows too
     if (switching) switchProjectServers(leaving, entry.id);   // servers + Storybook follow the project
+    applyChatFirst();   // a new project opens chat-only until it has something to show
   }
 
   // ── Project switch: tear down, then bring up (one awaited sequence) ──
@@ -12933,6 +12941,122 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       addServer(project.id, { name: info.comm || 'dev', cmd: info.cmd || '', cwd: info.dir, port: +port, runIn: 'wsl', docker: info.docker });
     }
   }
+
+  // ── Chat-first new projects ─────────────────────────────────────
+  // A brand-new project has nothing to show yet, so it opens in the existing chat-only
+  // single-pane layout with the Browser blanked (no stale page from the last project).
+  // Once something answers — a localhost URL the agent posted, or a server running in
+  // the project's folder — the chat ASKS whether to open it. The page is preloaded in
+  // the hidden view meanwhile, so "Open browser" slides the split back open onto a page
+  // that's already drawn. p.chatFirst is localStorage-only (not in the manifest) and
+  // survives project switches until the reveal, or until the user leaves chat-only
+  // mode themselves (they've taken control of the layout).
+  const CF_URL_RE = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::(\d{2,5}))?(?:\/[^\s)\]>"'`]*)?/gi;
+  let cfApplied = false;            // we put the UI into chat-only mode (so we may undo it)
+  let cfTimer = null, cfTick = 0, cfBusy = false, cfCard = null;
+  const cfUrls = new Map();         // projectId → Set(url) the agent posted
+  const cfOffered = new Set();      // 'projectId|url' already asked about this session
+
+  function markChatFirst(id) { if (id) updateProject(id, p => { p.chatFirst = true; }); }
+  function clearChatFirst(id) {
+    if (id && getProject(id)?.chatFirst) updateProject(id, p => { delete p.chatFirst; });
+    cfUrls.delete(id);
+    stopCfPoll(); removeCfCard(); cfReadyPulse(false);
+    cfApplied = false;
+  }
+  // Called on every activation: enter chat-only for a chat-first project, and undo
+  // it when switching away to a normal one (only if we were the ones who set it).
+  function applyChatFirst() {
+    const p = activeProject();
+    removeCfCard(); cfReadyPulse(false);
+    if (p && p.chatFirst) {
+      ipcRenderer.send(IPC.BROWSER_NAVIGATE, 'about:blank');
+      cfApplied = true;
+      setSinglePane('chat');
+      startCfPoll();
+    } else {
+      stopCfPoll();
+      if (cfApplied) { cfApplied = false; setSinglePane(null); }
+    }
+  }
+  // The user changed panes by hand. Still chat-only → nothing to do; anything else
+  // means they've opened the Browser themselves, so the project is no longer chat-first.
+  window.__cfUserPane = (stillChat) => {
+    const p = activeProject();
+    if (!stillChat && p && p.chatFirst) clearChatFirst(p.id);
+  };
+  // Scan a finished agent message for localhost URLs (finalized text, so a URL is
+  // never caught half-streamed).
+  window.__cfScan = (s, text) => {
+    const id = (s && s.projectId) || getActiveId();
+    const p = id && getProject(id);
+    if (!p || !p.chatFirst || !text) return;
+    let set = cfUrls.get(id);
+    for (const m of text.matchAll(CF_URL_RE)) {
+      const url = m[0].replace(/[.,;:!?]+$/, '').replace('0.0.0.0', 'localhost');
+      if (!set) cfUrls.set(id, set = new Set());
+      set.add(url);
+    }
+    if (set && set.size && id === getActiveId()) cfCheck();
+  };
+
+  function startCfPoll() { if (!cfTimer) { cfTick = 0; cfTimer = setInterval(cfCheck, 3000); cfCheck(); } }
+  function stopCfPoll() { clearInterval(cfTimer); cfTimer = null; }
+  async function cfCheck() {
+    if (cfBusy || cfCard) return;
+    const p = activeProject();
+    if (!p || !p.chatFirst) { stopCfPoll(); return; }
+    cfBusy = true;
+    try {
+      // Every other tick, pull in servers the agent started inside the project folder.
+      if (cfTick++ % 2 === 0) await adoptForeignServers(p);
+      const cur = getProject(p.id) || p;
+      const urls = [...(cfUrls.get(p.id) || [])];
+      (cur.servers || []).forEach(s => { if (s.port && s.role !== 'storybook') urls.push('http://localhost:' + s.port); });
+      const fresh = urls.filter(u => !cfOffered.has(p.id + '|' + u));
+      if (!fresh.length) return;
+      const portOf = (u) => { const m = /^https?:\/\/[^/:]+:(\d{2,5})/i.exec(u); return m ? +m[1] : 80; };
+      const ports = [...new Set(fresh.map(portOf))];
+      let running = {};
+      try { ({ running } = await ipcRenderer.invoke(IPC.SERVER_STATUS, { ports })); } catch (_) {}
+      const url = fresh.find(u => running && running[portOf(u)]);
+      if (url && getActiveId() === p.id && getProject(p.id)?.chatFirst) offerReveal(p, url);
+    } finally { cfBusy = false; }
+  }
+
+  // The ask: an inline card at the end of the active chat (or a floating card when
+  // the active tab isn't an ACP chat). Preloads the page so the reveal lands drawn.
+  function offerReveal(p, url) {
+    cfOffered.add(p.id + '|' + url);
+    ipcRenderer.send(IPC.BROWSER_NAVIGATE, url);   // hidden while chat-only → loads off-screen
+    cfReadyPulse(true);
+    const s = sessions.get(activeId);
+    const inChat = !!(s && s.msgsEl);
+    const card = document.createElement('div');
+    card.className = inChat ? 'acp-msg assistant cf-offer' : 'pc-prompt cf-offer';
+    const text = document.createElement('div'); text.className = inChat ? 'acp-msg-text' : 'pc-text';
+    text.append('Your app is running at ');
+    const code = document.createElement('code'); code.textContent = url;
+    text.append(code, '. Open it in the Browser?');
+    const acts = document.createElement('div'); acts.className = 'cf-acts';
+    const yes = document.createElement('button'); yes.className = 'modal-btn-confirm'; yes.textContent = 'Open browser';
+    const no  = document.createElement('button'); no.className  = 'modal-btn-cancel';  no.textContent  = 'Not yet';
+    yes.addEventListener('click', () => {
+      clearChatFirst(p.id);
+      setSinglePane(null);   // the existing split slide — page is already loaded behind it
+    });
+    no.addEventListener('click', () => { removeCfCard(); cfCheck(); });   // keep watching for other URLs; BROWSER tab stays lit
+    acts.append(yes, no);
+    card.append(text, acts);
+    if (inChat) { s.msgsEl.appendChild(card); acpScrollEnd(s); } else document.body.appendChild(card);
+    cfCard = card;
+  }
+  function removeCfCard() { if (cfCard) { cfCard.remove(); cfCard = null; } }
+  // Light up the collapsed strip's BROWSER tab so the preview is discoverable after "Not yet".
+  function cfReadyPulse(on) {
+    document.querySelector('.cn-label[data-pane="browser"]')?.classList.toggle('cf-ready', !!on);
+  }
+  setTimeout(applyChatFirst, 0);   // a chat-first project that was active at last quit
 
   function removeProject(id) {
     const list = loadProjects().filter(p => p.id !== id);
@@ -13382,19 +13506,21 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
 
     // Turn a folder into a tracked project (repo remote/branch prefilled into the manifest).
     // moveChat: the agent asked for this project, so switch to it and bring its chat along.
-    function adoptDirAsProject(dir, info, moveChat = false) {
+    // chatFirst: the agent asked for a brand-new project — open it chat-only (see applyChatFirst).
+    function adoptDirAsProject(dir, info, moveChat = false, chatFirst = false) {
       const entry = registerProject(dir, (info && info.name) || undefined);
       if (entry && info && info.remote) updateProject(entry.id, p => { p.repo = { remote: info.remote, branch: info.branch }; });
+      if (entry && chatFirst) markChatFirst(entry.id);
       if (entry && moveChat) { adoptActiveSession(entry.id); activateProjectById(entry.id); }
       renderMenu();
     }
     // A new branch tracked as its own project — folder is shared, so it's localStorage-only
     // (no per-folder manifest; true per-branch manifests need worktrees, a later slice).
-    function createBranchProject(t, name) {
+    function createBranchProject(t, name, chatFirst = false) {
       const id = projId(t.dir) + '#' + t.branch;
       const list = loadProjects();
       if (!list.some(p => p.id === id)) {
-        list.push({ id, name: (name || '').trim() || `${nameFor(t.dir)} (${t.branch})`, rootDir: t.dir, branch: t.branch, branchScoped: true, repo: t.remote ? { remote: t.remote, branch: t.branch } : undefined, lastActiveAt: Date.now() });
+        list.push({ id, name: (name || '').trim() || `${nameFor(t.dir)} (${t.branch})`, rootDir: t.dir, branch: t.branch, branchScoped: true, repo: t.remote ? { remote: t.remote, branch: t.branch } : undefined, lastActiveAt: Date.now(), chatFirst: chatFirst || undefined });
         saveProjects(list);
       }
       // Switch to it and bring the chat along — that chat is doing the branch's work.
@@ -13473,8 +13599,8 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
           name: nm, dir: t.dir, note: t.note || '', branch: t.branch || '',
           onCreate: (picked) => {
             saveDecision(key, 'project');
-            if (onBranch) createBranchProject({ ...t, branch: t.branch }, picked);
-            else adoptDirAsProject(t.dir, { ...t, name: picked }, true);
+            if (onBranch) createBranchProject({ ...t, branch: t.branch }, picked, true);
+            else adoptDirAsProject(t.dir, { ...t, name: picked }, true, true);
           },
           onStay:   () => { saveDecision(key, 'keep'); },
         });
@@ -13761,7 +13887,8 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       try { res = await ipcRenderer.invoke(IPC.PROJECT_CREATE, { parentDir: parent, name }); } catch (e) { res = { ok: false, error: String(e) }; }
       busy.dismiss();
       if (!res || !res.ok) { showToast('Create failed: ' + ((res && res.error) || 'unknown'), { duration: 6000 }); return; }
-      registerProject(res.dir, res.name);
+      const created = registerProject(res.dir, res.name);
+      markChatFirst(created && created.id);   // nothing to show yet → chat-only until the agent serves something
       activateProject(res.dir, res.name);
       renderMC();
       showToast('Created ' + res.name, { duration: 4000 });

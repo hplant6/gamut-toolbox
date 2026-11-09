@@ -825,6 +825,9 @@ html, body {
 .pc-prompt { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 3000; max-width: 540px; display: flex; flex-direction: column; gap: 12px; background: var(--spec-header-bg); border: 1px solid var(--spec-structural); border-radius: 12px; padding: 16px 18px; box-shadow: 0 10px 34px rgba(0,0,0,0.55); }
 .pc-text { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; color: var(--spec-text); word-break: break-word; }
 .pc-acts { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+/* Chat-first new project: "your app is running — open it?" card (inline in the chat, or floating as a .pc-prompt) */
+.cf-offer .cf-acts { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.cf-offer.pc-prompt .cf-acts { justify-content: flex-end; margin-top: 0; }
 .pc-btn { padding: 7px 14px; font-family: var(--font-title); font-weight: 600; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; background: var(--spec-dropdown-bg); border: 1px solid var(--spec-structural); border-radius: 7px; color: var(--spec-text); cursor: pointer; transition: filter 0.1s, background 0.1s; }
 .pc-btn:hover { background: var(--spec-structural); }
 .pc-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -4174,6 +4177,11 @@ html, body {
 /* active tab = the pane currently filling the main area (shade 3); sits in front */
 .pane-chat    .cn-label[data-pane="chat"],
 .pane-browser .cn-label[data-pane="browser"] { background: var(--spec-structural); color: var(--spec-text); z-index: 2; }
+/* Chat-first: the preview is loaded behind the strip — mark the BROWSER tab until it's opened */
+.cn-label.cf-ready { color: var(--spec-accent); }
+.cn-label.cf-ready span { animation: cf-ready-pulse 1.6s ease-in-out infinite; }
+@keyframes cf-ready-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .cn-label.cf-ready span { animation: none; } }
 /* concave fillets where the tab's right edge meets the content, matching the tab colour */
 .cn-label::before, .cn-label::after {
   content: ''; position: absolute; right: 0; width: 16px; height: 16px;
