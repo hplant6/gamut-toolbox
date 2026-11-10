@@ -4760,6 +4760,14 @@ ipcRenderer.on(IPC.ACP_TERM_RELEASE, (_, { id, termId }) => {
 
 // Boot: reopen the sessions from last launch (default profile on first run)
 (() => {
+  // Announce the active project BEFORE any restored agent spawns, so its project block
+  // (name/branch) is already on disk when the agent reads CLAUDE.md. The project
+  // switcher's own activation further down repeats this; that's harmless.
+  try {
+    const aid = localStorage.getItem(LS.activeProject);
+    const ap = aid && JSON.parse(localStorage.getItem(LS.projects) || '[]').find(x => x.id === aid);
+    if (ap && ap.rootDir) ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: ap.rootDir, project: { name: ap.name, branch: ap.branch || '', branchScoped: !!ap.branchScoped } });
+  } catch (_) {}
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(OPEN_SESSIONS_KEY) || 'null'); } catch (_) {}
   if (saved && Array.isArray(saved.list) && saved.list.length) {
@@ -12740,7 +12748,7 @@ async function detectStorybook() {
 }
 
 // Init — re-adopt the remembered Storybook only if it's actually still running.
-ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: (sbConfig && sbConfig.projectDir) || '' });
+if (sbConfig && sbConfig.projectDir) ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: sbConfig.projectDir });   // never send '' here: it wiped the active project announced at boot
 if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-folder'); if (sf) sf.value = sbConfig.projectDir; }
 
 // ── Project switcher ──────────────────────────────────────────────
