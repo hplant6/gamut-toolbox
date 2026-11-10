@@ -2254,13 +2254,29 @@ function stripDelimited(text, start, end) {
   const out = text.slice(0, s) + text.slice(e + end.length);
   return out.replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '').replace(/\n+$/, '') + (out.trim() ? '\n' : '');
 }
+// The project the renderer says is active. The folder manifest only knows the BASE
+// project of a folder — branch-scoped projects share that folder and live in
+// localStorage — so without this every branch project was announced to agents under
+// the base project's name (Henry's "Responsive viewports" chat was told it was in
+// "Drag & drop", and the agent then invented reasons why).
+let currentProjectMeta = null;   // { dir, name, branch, branchScoped }
+const _pathKey = (d) => String(d || '').replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+function activeMetaFor(dir) {
+  return currentProjectMeta && _pathKey(currentProjectMeta.dir) === _pathKey(dir) ? currentProjectMeta : null;
+}
 function projectBlock(dir) {
   const m = readProjectManifest(dir) || {};
-  const name = m.name || path.basename(String(dir).replace(/[\\/]+$/, ''));
+  const meta = activeMetaFor(dir);
+  const baseName = m.name || path.basename(String(dir).replace(/[\\/]+$/, ''));
+  const name = (meta && meta.name) || baseName;
   const branch = gitBranchOf(dir);
   const servers = Array.isArray(m.servers) ? m.servers : [];
   const lines = [PJ_START, '## Project (managed by Gamut Toolbox)', `You are working in the project **${name}**.`, `- Root: \`${dir}\``];
-  if (branch) lines.push(`- Git branch: \`${branch}\``);
+  if (meta && meta.branchScoped && meta.branch) {
+    lines.push(`- Project branch: \`${meta.branch}\` — this project is that branch's work, tracked separately from other work in the same folder.`);
+    if (branch && branch !== meta.branch) lines.push(`- Checked out right now: \`${branch}\` (not this project's branch — mention it to the user if it matters for the task).`);
+  } else if (branch) lines.push(`- Git branch: \`${branch}\``);
+  if (name !== baseName) lines.push(`- Root is shared with other projects (its folder belongs to **${baseName}**). Neither the folder name nor the path tells you which project you are in — this block does. You are in **${name}**.`);
   if (m.repo && m.repo.remote) lines.push(`- Repo: ${m.repo.remote}`);
   const linked = Array.isArray(m.linkedDirs) ? m.linkedDirs.filter(Boolean) : [];
   if (linked.length) {
@@ -2286,7 +2302,7 @@ function projectBlock(dir) {
     '',
     '### When the work changes',
     'Watch for work that does **not** belong to this project. For example: **starting a brand-new app or project from scratch**, or moving onto a different repo or task unrelated to what is described above. Bringing in the code this project is about is **not** new work — see "Where this project\'s files go".',
-    'Also signal when the user moves onto **a different branch or PR of this same repo** — add `"branch": "<name>"` to the file and leave `dir` as this project\'s root. Gamut Toolbox then tracks that branch as its own project.',
+    'Also signal when the user moves onto **a different branch or PR of this same repo** — add `"branch": "<name>"` to the file and leave `dir` as this project\'s root. `branch` is the branch the **new** work will be on (the one you are about to create or check out), never the branch currently checked out. Gamut Toolbox then tracks that branch as its own project.',
     'When you notice that, do **not** ask in chat and do not start the work yet. Write the file below instead — Gamut Toolbox shows the user a prompt with the choice, and tells you which way they answered. Wait for that reply before continuing.',
     'The file (Gamut Toolbox consumes it immediately):',
     '',
@@ -2440,8 +2456,12 @@ function spawnCwd(dir) {
   try { if (dir && typeof dir === 'string' && fs.existsSync(dir)) return dir; } catch (_) {}
   return sessionCwd();
 }
-ipcMain.on(IPC.SET_PROJECT_DIR, (_, { dir } = {}) => {
+ipcMain.on(IPC.SET_PROJECT_DIR, (_, { dir, project } = {}) => {
   currentProjectDir = dir || '';
+  // Identity comes with project activations. Other senders (Storybook panel, folder
+  // pickers) send only a dir: keep the identity if it's the same folder, else drop it.
+  if (project && dir) currentProjectMeta = { dir, name: String(project.name || ''), branch: String(project.branch || ''), branchScoped: !!project.branchScoped };
+  else if (!activeMetaFor(currentProjectDir)) currentProjectMeta = null;
   startProjectWatchers(currentProjectDir);
   watchAgentSignal(currentProjectDir);
   startSlidersWatch(currentProjectDir);

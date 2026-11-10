@@ -12804,7 +12804,9 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
     const leaving = getActiveId();
     const switching = leaving !== entry.id;
     setActiveId(entry.id);
-    ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: entry.rootDir });
+    // Send who we are, not just where: branch-scoped projects share rootDir with the
+    // base project, and the agent project block must name the one that's active.
+    ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: entry.rootDir, project: { name: entry.name, branch: entry.branch || '', branchScoped: !!entry.branchScoped } });
     try { localStorage.setItem(LS.projectDir, entry.rootDir); } catch (_) {}   // keep legacy key in sync
     updateChip();
     if (typeof onProjectChanged === 'function') onProjectChanged();   // swap the visible session tabs to this project
@@ -13813,7 +13815,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         const commit = (save) => {
           if (done) return; done = true;
           const nv = input.value.trim();
-          if (save && nv && nv !== p.name) { updateProject(p.id, pr => { pr.name = nv; }); if (getActiveId() === p.id) updateChip(); }
+          if (save && nv && nv !== p.name) { updateProject(p.id, pr => { pr.name = nv; }); if (getActiveId() === p.id) { updateChip(); const e = getProject(p.id); ipcRenderer.send(IPC.SET_PROJECT_DIR, { dir: e.rootDir, project: { name: e.name, branch: e.branch || '', branchScoped: !!e.branchScoped } }); } }   // agents' project block follows the rename
           renderMC();
         };
         input.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Enter') { ev.preventDefault(); commit(true); } else if (ev.key === 'Escape') { ev.preventDefault(); commit(false); } });
