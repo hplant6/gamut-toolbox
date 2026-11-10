@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-11-10
+
+### Added
+- **Copy Link.** Right-click a link in the chat or in the Browser to copy its address.
+
+### Changed
+- **The Claude model menu is live and shows versions.** It lists the models your Claude account offers, by full name (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1), and **Default** says which model it uses. Switching keeps the conversation, the pick survives a restart of the tab, and changes made with `/model` in the chat show up in the menu. The Claude adapter Gamut installs is updated to 0.95.0, which brings the current models; it updates itself the first time you open a Claude chat.
+- **The chat banner names the model with its version** ("Opus 5.5" instead of "opus").
+
+### Fixed
+- **Agents are told the right project.** Projects that share a folder (a project and the branches tracked from it) were all introduced to agents under the folder's original project name, so a chat in "Responsive viewports" was told it was in "Drag & drop". The chat is now told the project you're in, the branch that project tracks, and when a different branch is checked out.
+- **Chats reopened at startup know their project from the start.** Gamut now tells agents which project they're in before reopening your chats, rather than just after.
+- **Copy buttons copy.** Copying a message, a code block, a server address or a login link did nothing whenever the Browser or another app had focus, and some buttons still said "Copied". Copies now always land, and a button says **Copy failed** if one ever doesn't.
+
 ## [1.20.0] - 2026-11-09
 
 ### Added
