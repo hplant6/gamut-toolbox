@@ -120,6 +120,7 @@ const IPC = Object.freeze({
   CHECK_MODEL: 'check-model',
   CHECK_WSL: 'check-wsl',
   CLIPBOARD_READ: 'clipboard-read',
+  CLIPBOARD_WRITE: 'clipboard-write',
   CLOSE_INLINE_POPUP: 'close-inline-popup',
   CODE_LIST: 'code-list',
   CODE_POLL: 'code-poll',

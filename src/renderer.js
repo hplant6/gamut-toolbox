@@ -2588,9 +2588,10 @@ function showHermesSetup(s) {
     '</div>';
   const copyBtn = card.querySelector('.hermes-setup-copy');
   copyBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText('hermes model').catch(() => {});
-    copyBtn.textContent = 'Copied ✓';
-    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    copyText('hermes model').then(ok => {
+      copyBtn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+      setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+    });
   });
   card.querySelector('.hermes-setup-close').addEventListener('click', () => {
     card.remove(); s._setupCard = null;
@@ -4007,7 +4008,8 @@ function codeCopyButton(code) {
   btn.addEventListener('mousedown', e => e.preventDefault());   // keep text selection
   btn.addEventListener('click', e => {
     e.stopPropagation();
-    navigator.clipboard.writeText(code).then(() => {
+    copyText(code).then(ok => {
+      if (!ok) { flashCopyFailed(btn, () => { btn.innerHTML = COPY_ICON; }); return; }
       btn.textContent = 'COPIED';
       btn.classList.add('copied');
       btn.title = 'Copied';
@@ -4049,7 +4051,8 @@ function acpFinalizeStream(s) {
 function addReplyMeta(s, bubble, text) {
   let resetTimer = null;
   function doCopy() {
-    navigator.clipboard.writeText(text).then(() => {
+    copyText(text).then(ok => {
+      if (!ok) { flashCopyFailed(copyBtn, () => { copyBtn.innerHTML = COPY_ICON; }); return; }
       copyBtn.innerHTML = 'COPIED';
       copyBtn.classList.add('copied');
       copyBtn.title = 'Copied';
@@ -4089,6 +4092,19 @@ function addReplyMeta(s, bubble, text) {
 }
 
 const COPY_ICON = '<svg viewBox="0 0 18 18" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"><path d="M12.25 5.75H13.75C14.85 5.75 15.75 6.65 15.75 7.75V13.75C15.75 14.85 14.85 15.75 13.75 15.75H7.75C6.65 15.75 5.75 14.85 5.75 13.75V12.25"></path><path d="M10.25 2.25H4.25C3.15 2.25 2.25 3.15 2.25 4.25V10.25C2.25 11.35 3.15 12.25 4.25 12.25H10.25C11.35 12.25 12.25 11.35 12.25 10.25V4.25C12.25 3.15 11.35 2.25 10.25 2.25Z"></path></svg>';
+
+// Copy text via the main process (Electron's clipboard). navigator.clipboard is refused
+// whenever this document isn't focused (browser panel / another window active), and the
+// old callers swallowed that, so nothing was copied. Resolves true only once main has
+// read the clipboard back and it matches.
+function copyText(text) {
+  return ipcRenderer.invoke(IPC.CLIPBOARD_WRITE, String(text ?? '')).then(ok => !!ok, () => false);
+}
+function flashCopyFailed(el, restore, ms = 1500) {
+  if (!el) return;
+  el.textContent = 'Copy failed';
+  setTimeout(restore, ms);
+}
 
 // Hover copy button for a chat message. `getText` reads the text at click time
 // (so it works for still-streaming assistant messages).
@@ -5257,7 +5273,7 @@ let openLocalhostModal = null;
       const openB = mkBtn('Open', 'lh-open'), copyB = mkBtn('Copy', 'lh-copy'), killB = mkBtn('Kill', 'lh-kill');
       openB.title = 'Open ' + urlFor(p) + ' in the Browser';
       openB.addEventListener('click', () => { ipcRenderer.send(IPC.BROWSER_NAVIGATE, urlFor(p)); ctl.close(); });
-      copyB.addEventListener('click', () => { navigator.clipboard.writeText(urlFor(p)).then(() => { copyB.textContent = 'Copied'; setTimeout(() => { copyB.textContent = 'Copy'; }, 1000); }).catch(() => {}); });
+      copyB.addEventListener('click', () => { copyText(urlFor(p)).then(ok => { copyB.textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { copyB.textContent = 'Copy'; }, 1000); }); });
       if (!p.pid) killB.disabled = true;
       let armed = false, armTimer = null;
       killB.addEventListener('click', () => {   // two-step confirm — killing is destructive
@@ -5847,10 +5863,11 @@ function submitAuthLoginCode() {
 document.getElementById('auth-login-open')?.addEventListener('click', () => ipcRenderer.send(IPC.AUTH_LOGIN_OPEN));
 document.getElementById('auth-login-copy')?.addEventListener('click', e => {
   if (!authLoginUrlSeen) return;
-  navigator.clipboard.writeText(authLoginUrlSeen).then(() => {
-    e.target.textContent = 'Copied';
-    setTimeout(() => { e.target.textContent = 'Copy link'; }, 1200);
-  }).catch(() => {});
+  const btn = e.currentTarget;
+  copyText(authLoginUrlSeen).then(ok => {
+    btn.textContent = ok ? 'Copied' : 'Copy failed';
+    setTimeout(() => { btn.textContent = 'Copy link'; }, 1200);
+  });
 });
 document.getElementById('auth-login-paste')?.addEventListener('click', async () => {
   try {
@@ -9450,9 +9467,10 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   ['pointerup', 'pointerleave'].forEach(ev => cmp.addEventListener(ev, () => compare(false)));
   $('sl-copy').addEventListener('click', (e) => {
     if (!cur) return;
-    navigator.clipboard.writeText(JSON.stringify(changedValues(), null, 2)).then(() => {
-      e.target.textContent = 'Copied'; setTimeout(() => { e.target.textContent = 'Copy'; }, 1000);
-    }).catch(() => {});
+    const btn = e.currentTarget;
+    copyText(JSON.stringify(changedValues(), null, 2)).then(ok => {
+      btn.textContent = ok ? 'Copied' : 'Copy failed'; setTimeout(() => { btn.textContent = 'Copy'; }, 1000);
+    });
   });
   $('sl-paste').addEventListener('click', async () => {
     if (!cur) return;
@@ -14917,7 +14935,7 @@ let openOnboarding = null;
         extra.innerHTML = `<div class="onb-manual">${step.manualHtml}</div>
           <div class="onb-cmd"><code>${esc(step.cmd)}</code></div>`;
         const cmdRow = extra.querySelector('.onb-cmd');
-        cmdRow.appendChild(mkBtn('Copy', 'primary', () => navigator.clipboard.writeText(step.cmd)));
+        cmdRow.appendChild(mkBtn('Copy', 'primary', () => copyText(step.cmd)));
         actions.appendChild(recheckBtn);
       } else if (step.auth) {
         installBtn = mkBtn('Open authentication', 'primary', () => openAuthModal());

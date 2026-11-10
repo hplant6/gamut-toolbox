@@ -613,6 +613,7 @@ function createWindow() {
 
     if (p.selectionText || p.isEditable) {
       if (p.editFlags.canCut)  tpl.push({ label: 'Cut',  click: () => browserView.webContents.cut()  });
+      if (p.linkURL)           tpl.push({ label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) });
       if (p.selectionText)     tpl.push({ label: 'Copy', click: () => browserView.webContents.copy() });
       if (p.editFlags.canPaste) tpl.push({ label: 'Paste', click: () => browserView.webContents.paste() });
       tpl.push({ label: 'Select All', click: () => browserView.webContents.selectAll() });
@@ -647,6 +648,7 @@ function createWindow() {
       tpl.push({ type: 'separator' });
     }
     if (p.editFlags.canCut)    tpl.push({ label: 'Cut',        role: 'cut'       });
+    if (p.linkURL && !/^(file|javascript):/i.test(p.linkURL)) tpl.push({ label: 'Copy Link', click: () => clipboard.writeText(p.linkURL) });   // chat links
     if (p.selectionText || p.editFlags.canCopy) tpl.push({ label: 'Copy', role: 'copy' });
     if (p.editFlags.canPaste)  tpl.push({ label: 'Paste',      role: 'paste'     });
     if (tpl.length && tpl[tpl.length - 1].type !== 'separator') tpl.push({ type: 'separator' });
@@ -4104,6 +4106,12 @@ function buildMcpAddCmd(agent, entry, hasToken) {
 }
 
 ipcMain.handle(IPC.CLIPBOARD_READ, () => { try { return clipboard.readText(); } catch (_) { return ''; } });
+// Renderer copies go through here, not navigator.clipboard: that API is refused
+// ("Document is not focused") whenever the browser panel or another window holds focus,
+// and its callers swallowed the rejection. Read back so "Copied" is only shown when true.
+ipcMain.handle(IPC.CLIPBOARD_WRITE, (_, text) => {
+  try { const t = String(text ?? ''); clipboard.writeText(t); return clipboard.readText() === t; } catch (_) { return false; }
+});
 
 // Fast check (no health-check) whether a given MCP server is configured in any
 // agent's user-scope config. Reads the config files directly.
