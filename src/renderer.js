@@ -1186,6 +1186,10 @@ function selectModel(modelId) {
   // Only catalogue picks touch s.model — it is replayed as a launch argument on
   // respawn. Advertised picks are tracked in acpModels.currentModelId.
   if (!advertised) s.model = modelId;
+  // Claude's advertised ids are aliases ANTHROPIC_MODEL accepts ("opus", "sonnet[1m]"),
+  // so remember them as the launch selector too — a restart then keeps the pick.
+  // ("default" = no override.) Hermes' advertised ids are not profiles: never.
+  else if (s.agent === 'claude') s.model = modelId === 'default' ? '' : modelId;
   const label = (sessionModels(s).find(m => m.id === modelId) || {}).label || modelId || 'Default';
 
   if (s._modelToast) s._modelToast.dismiss();
@@ -2704,6 +2708,9 @@ function sessionModels(s) {
   const adv = (s && s.acpModels && s.acpModels.models) || [];
   const cat = modelsFor(sessionToolKey(s));
   if (!adv.length) return cat;
+  // Only Hermes' catalogue adds something (profiles = a whole provider stack). For
+  // Claude the live list supersedes the static aliases, which carry no version.
+  if (s.agent !== 'hermes') return adv;
   const extra = cat.filter(c => c.id && !adv.some(a => a.id === c.id));
   return adv.concat(extra);
 }
@@ -4486,7 +4493,7 @@ ipcRenderer.on(IPC.ACP_READY, (_, { id, version, model, cwd, agent, modes, model
   s.acpModels = models || null;
   acpSetStatus(s, 'ready');
   refreshStatusFlags();   // the block is per-project — re-read for this session's cwd
-  renderAcpBanner(s, version || '', model || sessionModelName(s), cwd || '');
+  renderAcpBanner(s, version || '', sessionModelName(s) || model, cwd || '');   // live versioned name ("Opus 5.5") beats settings.json's alias
   if (s === sessions.get(activeId)) { updateModePill(); refreshUsage(); }
   finishModelSwitch(s);  // dismiss "switching…" toast + confirm, if a model switch is pending
 });

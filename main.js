@@ -2853,7 +2853,10 @@ async function requireAcp() {
 // global at runtime, not in package.json). Pin it here and verify the
 // installed VERSION — a presence-only check let stale globals skew silently.
 const ACP_ADAPTER_PKG     = '@agentclientprotocol/claude-agent-acp';
-const ACP_ADAPTER_VERSION = '0.42.0';
+// 0.42.0 bundled Claude SDK 0.3.165, whose model list stopped at Opus 4.8 / Sonnet 4.6.
+// 0.95.0 (SDK 0.3.309) lists the 5.x family with versions in the names. Tested
+// 2026-11-10: handshake, set_config_option model switch, prompt, modes.
+const ACP_ADAPTER_VERSION = '0.95.0';
 let _acpAdapterVerified   = false;   // version confirmed once per app run
 
 function acpAdapterInstalledVersion() {
@@ -3038,11 +3041,39 @@ const ACP_LAUNCH = {
 // Normalise the ACP model selector an agent attaches to session/new|load|resume.
 // The wire format is camelCase, but agents bridged from other languages sometimes
 // leak snake_case, so accept both and hand the renderer one shape. Returns null
-// when the agent advertises no models (Claude/Codex today) — callers then
-// fall back to the static MODEL_CATALOG.
+// when the agent advertises no models — callers then fall back to the static
+// MODEL_CATALOG.
+//
+// Two wire shapes: the older `models` selector (Hermes; switched via
+// session/set_model), and the newer session config options — a `configOptions`
+// entry of category "model" (claude-agent-acp; switched via
+// session/set_config_option). The latter carries the versioned names
+// ("Opus 5.5") the old static list couldn't show. `via` records which setter to use.
+function acpConfigModelOption(list) {
+  return (Array.isArray(list) ? list : []).find(o => o && o.type === 'select' && (o.category === 'model' || o.id === 'model')) || null;
+}
+function acpModelStateFromConfig(list) {
+  const o = acpConfigModelOption(list);
+  if (!o) return null;
+  const flat = (o.options || []).flatMap(x => (x && Array.isArray(x.options)) ? x.options : [x]);   // options may be grouped
+  const models = flat
+    .map(x => ({ id: x && x.value, label: (x && (x.name || x.value)) || '', desc: (x && x.description) || '' }))
+    .filter(x => x.id);
+  if (!models.length) return null;
+  // "Default (recommended)" only says which model in its description ("Opus" or
+  // "Sonnet 4.6 · …"). Name the versioned model it resolves to.
+  const def = models.find(x => x.id === 'default');
+  if (def && def.desc) {
+    const fam = def.desc.split('·')[0].trim().toLowerCase();
+    const hit = models.find(x => x !== def && (x.label.toLowerCase() === fam || x.label.toLowerCase().startsWith(fam + ' ')));
+    const ver = hit ? hit.label : def.desc.split('·')[0].trim();
+    if (ver && !def.label.includes(ver)) def.label = `Default (${ver})`;
+  }
+  return { currentModelId: o.currentValue || '', models, via: 'config', configId: o.id };
+}
 function acpModelState(r) {
   const m = r && r.models;
-  if (!m) return null;
+  if (!m) return acpModelStateFromConfig(r && (r.configOptions || r.config_options));
   const list = m.availableModels || m.available_models || [];
   const models = list
     .map(x => ({
@@ -3164,6 +3195,17 @@ async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resu
       if (params.update?.sessionUpdate === 'current_mode_update') {
         const e = acpSessions.get(id);
         if (e?.modes) e.modes.currentModeId = params.update.currentModeId;
+      }
+      // The model changed agent-side (a /model command, or the adapter clamping it):
+      // keep main's cache and the renderer's picker on the real value.
+      if (params.update?.sessionUpdate === 'config_option_update') {
+        const e = acpSessions.get(id);
+        const next = acpModelStateFromConfig(params.update.configOptions);
+        if (e && next && e.models && e.models.via === 'config') {
+          const changed = next.currentModelId !== e.models.currentModelId;
+          e.models = next;
+          if (changed) send(IPC.ACP_MODEL_CHANGED, { id, currentModelId: next.currentModelId });
+        }
       }
       send(IPC.ACP_UPDATE, { id, update: params.update });
     },
@@ -3308,7 +3350,12 @@ ipcMain.on(IPC.ACP_SET_MODEL, async (_, { id, modelId } = {}) => {
   if (!s || !s.conn || !modelId) return;
   const prev = s.models && s.models.currentModelId;
   try {
-    if (typeof s.conn.setSessionModel === 'function') {
+    if (s.models && s.models.via === 'config') {
+      // claude-agent-acp: models are a session config option.
+      const r = await s.conn.setSessionConfigOption({ sessionId: s.sessionId, configId: s.models.configId || 'model', value: modelId });
+      const next = acpModelStateFromConfig(r && r.configOptions);
+      if (next) { s.models = next; modelId = next.currentModelId || modelId; }   // the adapter may resolve an alias
+    } else if (typeof s.conn.setSessionModel === 'function') {
       await s.conn.setSessionModel({ sessionId: s.sessionId, modelId });   // typed path, once the SDK gains it
     } else if (s.conn.connection && typeof s.conn.connection.sendRequest === 'function') {
       await s.conn.connection.sendRequest('session/set_model', { sessionId: s.sessionId, modelId });
