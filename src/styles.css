@@ -2992,20 +2992,24 @@ html, body {
 .ss-marker-btn:hover { border-color: var(--spec-text-faint); }
 .ss-marker-btn.active { background: var(--spec-accent); border-color: var(--spec-accent); color: #fff; }
 /* Marker controls (reuse the marker tool styling): wheel + preview/slider + clear */
-#ss-marker-controls { display: flex; align-items: flex-start; gap: 22px; padding: 16px; background: var(--spec-header-bg); border-top: 1px solid var(--spec-header-bg); }
+#ss-marker-controls { display: flex; align-items: center; gap: 14px; padding: 12px 16px; background: var(--spec-header-bg); border-top: 1px solid var(--spec-header-bg); }
 #ss-marker-controls[hidden] { display: none; }
-#ss-marker-controls.is-eraser .dr-wheel { opacity: 0.35; pointer-events: none; }   /* colour is irrelevant while erasing */
-#ss-draw-canvas.tool-line, #ss-draw-canvas.tool-arrow { cursor: crosshair; }
-#ss-draw-canvas.tool-text { cursor: text; }
-/* eraser: cursor is a JS-built ring sized to the brush */
-/* In-place editor for a text label — same look as the label it becomes (white on the marker colour) */
-.ss-text-input {
-  position: absolute; z-index: 3; box-sizing: content-box; min-width: 2ch;
-  margin: 0; border: none; outline: 1px dashed rgba(255,255,255,0.8); outline-offset: 2px;
-  background: #ff3b30; color: #fff;   /* font, padding, colours set from JS to match the label */
-  line-height: 1.2; box-shadow: none; resize: none; overflow: hidden; white-space: pre;
+#ss-marker-controls .dr-clear-btn { margin-left: 4px; }
+/* Colour circle: shows the current colour at the brush size, opens the wheel popover */
+.ss-color-btn {
+  flex-shrink: 0; width: 34px; height: 34px; padding: 0; box-shadow: none;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--spec-toolbar-bg); border: 1px solid var(--spec-structural); border-radius: 50%;
+  cursor: pointer; transition: border-color 0.12s;
 }
-#ss-marker-controls .dr-clear-btn { align-self: center; margin-left: auto; }
+.ss-color-btn:hover, .ss-color-btn[aria-expanded="true"] { border-color: var(--spec-text-faint); }
+.ss-color-btn:disabled { opacity: 0.35; cursor: default; }   /* eraser: colour is irrelevant */
+.ss-color-pop {
+  position: fixed; z-index: 1900; padding: 12px; line-height: 0;   /* above the panels, below modal backdrops (2000) */
+  background: var(--spec-toolbar-bg); border: 1px solid var(--spec-structural); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.ss-color-pop[hidden] { display: none; }
 /* ss footer uses shared .tp-foot / .tp-textarea */
 
 /* Draw tool panel */

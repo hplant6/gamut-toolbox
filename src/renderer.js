@@ -10267,6 +10267,8 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   const toolBtns  = Array.from(panel.querySelectorAll('#ss-annot-tools [data-tool]'));
   const controls  = document.getElementById('ss-marker-controls');
   const iroWrap   = document.getElementById('ss-iro');
+  const colorBtn  = document.getElementById('ss-color-btn');
+  const colorPop  = document.getElementById('ss-color-pop');
   const swatch    = document.getElementById('ss-swatch');
   const sizeIn    = document.getElementById('ss-size');
   const clearBtn  = document.getElementById('ss-clear');
@@ -10445,35 +10447,54 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     const r = d / 2, svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d + 2}" height="${d + 2}"><circle cx="${r + 1}" cy="${r + 1}" r="${r}" fill="none" stroke="#000" stroke-width="1.5"/><circle cx="${r + 1}" cy="${r + 1}" r="${r - 0.5}" fill="none" stroke="#fff" stroke-width="1"/></svg>`;
     canvas.style.setProperty('cursor', `url("data:image/svg+xml;base64,${btoa(svg)}") ${r + 1} ${r + 1}, cell`);
   }
-  function setSwatchSize(size) { const d = Math.round(6 + (size / 20) * 24); swatch.style.width = d + 'px'; swatch.style.height = d + 'px'; }
+  function setSwatchSize(size) { const d = Math.round(6 + (size / 20) * 20); swatch.style.width = d + 'px'; swatch.style.height = d + 'px'; }   // fits the 34px circle
   function buildIro() {
     if (!window.iro || ssIro || !iroWrap) return;
     try {
-      ssIro = new iro.ColorPicker(iroWrap, { width: 90, color, layout: [{ component: iro.ui.Wheel }] });
+      ssIro = new iro.ColorPicker(iroWrap, { width: 140, color, layout: [{ component: iro.ui.Wheel }] });
       ssIro.on('color:change', (c) => {
         color = c.hexString; swatch.style.background = color;
         if (textEdit) { textEdit.color = color; textEdit.ta.style.background = color; textEdit.ta.style.color = labelInk(color); }
       });
     } catch (_) {}
   }
+  // ── Colour popover: anchored above the colour circle (below if there's no room) ──
+  function placePop() {
+    const r = colorBtn.getBoundingClientRect(), pw = colorPop.offsetWidth, ph = colorPop.offsetHeight;
+    let top = r.top - ph - 8; if (top < 8) top = r.bottom + 8;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - pw - 8));
+    colorPop.style.left = left + 'px'; colorPop.style.top = top + 'px';
+  }
+  function openPop() { buildIro(); colorPop.hidden = false; colorBtn.setAttribute('aria-expanded', 'true'); placePop(); }
+  function closePop() { if (colorPop.hidden) return; colorPop.hidden = true; colorBtn.setAttribute('aria-expanded', 'false'); }
+  colorBtn.addEventListener('click', () => (colorPop.hidden ? openPop() : closePop()));
+  document.addEventListener('mousedown', (e) => {
+    if (!colorPop.hidden && !colorPop.contains(e.target) && !colorBtn.contains(e.target)) closePop();
+  }, true);
+  // Esc closes just the popover, not the whole panel (capture, ahead of the panel's Esc handler)
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !colorPop.hidden) { e.preventDefault(); e.stopImmediatePropagation(); closePop(); }
+  }, true);
+  window.addEventListener('resize', () => { if (!colorPop.hidden) placePop(); });
+  // Recolouring a label mid-edit: keep focus in the label so picking a colour doesn't commit it.
+  [colorBtn, colorPop].forEach(el => el.addEventListener('mousedown', (e) => { if (textEdit) e.preventDefault(); }, true));
+
   function setTool(name) {
     commitText();
+    closePop();
     tool = name ? TOOL_OF[name] : null;
     controls.hidden = !tool;
-    controls.classList.toggle('is-eraser', tool === 'erase');
+    colorBtn.disabled = tool === 'erase';
     toolBtns.forEach(b => { const on = b.dataset.tool === name; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
     canvas.style.pointerEvents = tool ? 'auto' : 'none';
     canvas.className = tool ? 'tool-' + tool : '';
     eraserCursorFor = 0;
     if (tool === 'erase') eraserCursor(); else canvas.style.removeProperty('cursor');
-    if (tool) buildIro();
   }
   toolBtns.forEach(b => b.addEventListener('click', () => {
     const active = b.classList.contains('active');
     setTool(active ? null : b.dataset.tool);
   }));
-  // Recolouring a label mid-edit: keep focus in the label so the wheel doesn't commit it.
-  controls.addEventListener('mousedown', (e) => { if (textEdit && !e.target.closest('input, button')) e.preventDefault(); }, true);
   sizeIn.addEventListener('input', () => { lineWidth = +sizeIn.value; setSwatchSize(lineWidth); if (tool === 'erase') eraserCursor(); });
   clearBtn.addEventListener('click', () => { cancelText(); shapes = []; cur = null; redraw(); });
   // Ctrl/Cmd+Z: undo the last annotation (not while typing in the instruction box or a label)

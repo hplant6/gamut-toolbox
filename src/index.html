@@ -670,14 +670,10 @@
             </div>
           </div>
           <div id="ss-marker-controls" hidden>
-            <div id="ss-iro" class="dr-wheel"></div>
-            <div class="dr-right">
-              <span class="dr-preview-title">Preview</span>
-              <div class="dr-row">
-                <span class="dr-swatch-wrap"><span id="ss-swatch" class="dr-swatch"></span></span>
-                <input id="ss-size" type="range" class="rz-slider dr-slider" min="1" max="20" value="4" />
-              </div>
-            </div>
+            <button id="ss-color-btn" class="ss-color-btn" title="Colour" aria-label="Choose colour" aria-haspopup="dialog" aria-expanded="false">
+              <span id="ss-swatch" class="dr-swatch"></span>
+            </button>
+            <input id="ss-size" type="range" class="rz-slider dr-slider" min="1" max="20" value="4" aria-label="Size" />
             <button id="ss-clear" class="dr-clear-btn">Clear All</button>
           </div>
         </div>
@@ -728,6 +724,7 @@
         </div>
       </div>
 
+      <div id="ss-color-pop" class="ss-color-pop" role="dialog" aria-label="Colour" hidden><div id="ss-iro"></div></div>
       <div id="toast-stack"></div>
     </div>
 
