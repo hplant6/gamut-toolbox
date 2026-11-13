@@ -1132,8 +1132,8 @@ function readProjectManifest(dir) {
 // Out-of-git: ensure the repo ignores .cathode/ (best-effort, only inside a git repo).
 // Prefer .git/info/exclude: it's local to this checkout, so it never dirties a tracked
 // .gitignore, and it survives an agent checking a repo out over a fresh project (which
-// replaces the .gitignore we'd have written). A worktree's .git is a file, not a dir —
-// fall back to .gitignore there.
+// replaces the .gitignore we'd have written). A worktree's .git is a file — its
+// excludes live in the main repo's .git/info/exclude, which every worktree reads.
 const CATHODE_IGNORED = /^\s*\/?\.cathode\/?\s*$/m;
 function ensureCathodeIgnored(dir) {
   try {
@@ -1143,8 +1143,9 @@ function ensureCathodeIgnored(dir) {
     let cur = ''; try { cur = fs.readFileSync(gi, 'utf8'); } catch (_) {}
     if (CATHODE_IGNORED.test(cur)) return;   // already ignored
     let target = gi;
-    if (fs.statSync(git).isDirectory()) {
-      target = path.join(git, 'info', 'exclude');
+    const g = gitDirs(dir);
+    if (g) {
+      target = path.join(g.commonDir, 'info', 'exclude');
       fs.mkdirSync(path.dirname(target), { recursive: true });
       try { cur = fs.readFileSync(target, 'utf8'); } catch (_) { cur = ''; }
       if (CATHODE_IGNORED.test(cur)) return;
@@ -2339,8 +2340,8 @@ function projectBlock(dir) {
     '',
     '### When the work changes',
     'Watch for work that does **not** belong to this project. For example: **starting a brand-new app or project from scratch**, or moving onto a different repo or task unrelated to what is described above. Bringing in the code this project is about is **not** new work — see "Where this project\'s files go".',
-    'Also signal when the user moves onto **a different branch or PR of this same repo** — add `"branch": "<name>"` to the file and leave `dir` as this project\'s root. `branch` is the branch the **new** work will be on (the one you are about to create or check out), never the branch currently checked out. Gamut Toolbox then tracks that branch as its own project.',
-    'When you notice that, do **not** ask in chat and do not start the work yet. Write the file below instead — Gamut Toolbox shows the user a prompt with the choice, and tells you which way they answered. Wait for that reply before continuing.',
+    'Also signal when the user moves onto **a different branch or PR of this same repo** — add `"branch": "<name>"` to the file and leave `dir` as this project\'s root. `branch` is the branch the **new** work will be on (the one you are about to create or check out), never the branch currently checked out. Do **not** create or check out that branch in this folder yourself: if the user says yes, Gamut Toolbox gives it its own folder (a git worktree next to this repo, on that branch) and restarts you inside it with this conversation intact.',
+    'When you notice that, do **not** ask in chat and do not start the work yet. Write the file below instead — Gamut Toolbox shows the user a prompt with the choice, and tells you which way they answered. Wait for that reply before continuing. A new project always gets its own folder — never keep working on it in this one.',
     'The file (Gamut Toolbox consumes it immediately):',
     '',
     '```json',
@@ -2574,9 +2575,25 @@ async function emitWorkLabel(dir) {
 // ── Project auto-detect (Phase 3) ────────────────────────────────
 // Project-ish signals for a folder — used to gate the classify prompt and to
 // prefill a manifest (repo remote/branch) when a project is created.
+// { gitDir, commonDir } for a checkout. In a git worktree `.git` is a FILE pointing at
+// <main repo>/.git/worktrees/<name> (its HEAD), while refs/config live in the main
+// repo's .git (commondir). Plain checkouts: both are <dir>/.git.
+function gitDirs(dir) {
+  const p = path.join(dir, '.git');
+  try {
+    if (fs.statSync(p).isDirectory()) return { gitDir: p, commonDir: p };
+    const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(p, 'utf8'));
+    if (!m) return null;
+    const gitDir = path.resolve(dir, m[1].trim());
+    let commonDir = gitDir;
+    try { commonDir = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim()); } catch (_) {}
+    return { gitDir, commonDir };
+  } catch (_) { return null; }
+}
 function gitBranchOf(dir) {
   try {
-    const head = fs.readFileSync(path.join(dir, '.git', 'HEAD'), 'utf8').trim();
+    const g = gitDirs(dir); if (!g) return '';
+    const head = fs.readFileSync(path.join(g.gitDir, 'HEAD'), 'utf8').trim();
     const m = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
     return m ? m[1] : head.slice(0, 12);   // detached HEAD → short sha
   } catch (_) { return ''; }
@@ -2585,12 +2602,14 @@ function gitBranchOf(dir) {
 // HEAD names it, but no ref exists (loose or packed).
 function gitHasCommits(dir, branch = gitBranchOf(dir)) {
   if (!branch) return false;
-  try { if (fs.existsSync(path.join(dir, '.git', 'refs', 'heads', branch))) return true; } catch (_) {}
-  try { return fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8').includes(' refs/heads/' + branch + '\n'); } catch (_) { return false; }
+  const g = gitDirs(dir); if (!g) return false;
+  try { if (fs.existsSync(path.join(g.commonDir, 'refs', 'heads', branch))) return true; } catch (_) {}
+  try { return fs.readFileSync(path.join(g.commonDir, 'packed-refs'), 'utf8').includes(' refs/heads/' + branch + '\n'); } catch (_) { return false; }
 }
 function gitRemoteOf(dir) {
   try {
-    const cfg = fs.readFileSync(path.join(dir, '.git', 'config'), 'utf8');
+    const g = gitDirs(dir); if (!g) return '';
+    const cfg = fs.readFileSync(path.join(g.commonDir, 'config'), 'utf8');
     const m = /\[remote "origin"\][\s\S]*?url\s*=\s*(.+)/.exec(cfg);
     return m ? m[1].trim() : '';
   } catch (_) { return ''; }
@@ -2615,6 +2634,106 @@ function gitRootOf(dir) {
   return '';
 }
 ipcMain.handle(IPC.DIR_INFO, (_, { dir } = {}) => dirInfo(dir));
+
+// ── New project = new folder ─────────────────────────────────────────
+// A new project for a branch of a repo gets its own folder: a git worktree next to the
+// repo (<repo>-<name>), checked out on that branch. Branch projects used to share the
+// repo's folder, so their agent opened in the old project's folder and edited whatever
+// branch happened to be checked out there.
+function gitRun(cwd, args, timeout = 60000) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) =>
+      resolve({ ok: !err, out: String(stdout || '').trim(), err: String(stderr || (err && err.message) || '').trim() }));
+  });
+}
+function folderSlug(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+ipcMain.handle(IPC.PROJECT_WORKTREE, async (_, { dir, branch, name } = {}) => {
+  try {
+    branch = String(branch || '').trim();
+    const root = gitRootOf(dir || '');
+    if (!root || !branch) return { ok: false, error: 'Not a git repo, or no branch' };
+    // The branch already has its own folder (an earlier worktree) → that's the project's home.
+    const list = await gitRun(root, ['worktree', 'list', '--porcelain']);
+    let current = '';
+    for (const blk of list.out.split(/\n\s*\n/)) {
+      const wt = /^worktree (.+)$/m.exec(blk), br = /^branch refs\/heads\/(.+)$/m.exec(blk);
+      if (!wt || !br || br[1] !== branch) continue;
+      const wdir = path.resolve(wt[1]);
+      if (path.resolve(wdir).toLowerCase() !== path.resolve(root).toLowerCase()) return { ok: true, dir: wdir, existed: true, branch };
+      current = wdir;   // checked out in the repo's own folder — moved out below
+    }
+    // Pick a free sibling folder: <repo>-<name>, -2, -3…
+    const base = path.basename(root) + '-' + (folderSlug(name) || folderSlug(branch) || 'work');
+    let target = path.join(path.dirname(root), base);
+    for (let i = 2; fs.existsSync(target); i++) target = path.join(path.dirname(root), base + '-' + i);
+    const exists = (await gitRun(root, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).ok;
+    let stashed = false;
+    if (current) {
+      // The branch is checked out in the repo's folder (the agent or you just switched to
+      // it there). Its uncommitted work moves with it; the folder goes back to the
+      // branch it was on before (else the default branch, else a detached HEAD).
+      if ((await gitRun(root, ['status', '--porcelain'])).out) {
+        const st = await gitRun(root, ['stash', 'push', '-u', '-m', 'gamut: moving ' + branch + ' to its own folder']);
+        if (!st.ok) return { ok: false, error: 'Could not set aside uncommitted changes: ' + st.err };
+        stashed = true;
+      }
+      let back = (await gitRun(root, ['rev-parse', '--abbrev-ref', '@{-1}'])).out;
+      if (!back || back === branch || back === 'HEAD') {
+        back = '';
+        for (const b of ['main', 'master', 'develop']) if (b !== branch && (await gitRun(root, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + b])).ok) { back = b; break; }
+      }
+      const sw = back ? await gitRun(root, ['switch', back]) : await gitRun(root, ['switch', '--detach']);
+      if (!sw.ok) {
+        if (stashed) await gitRun(root, ['stash', 'pop']);
+        return { ok: false, error: 'Could not free the branch from ' + root + ': ' + sw.err };
+      }
+      if (root === currentProjectDir) _lastBranch = gitBranchOf(root);   // our own switch isn't a "new branch" to ask about
+    }
+    // The sibling-repo watcher would otherwise spot the new folder mid-creation and ask
+    // whether to track it as a project before the renderer has registered it.
+    if (path.dirname(root) === path.dirname(currentProjectDir || '')) _knownSiblings.add(path.basename(target));
+    const add = exists ? await gitRun(root, ['worktree', 'add', target, branch]) : await gitRun(root, ['worktree', 'add', '-b', branch, target]);
+    if (!add.ok) {
+      if (stashed) await gitRun(root, ['switch', branch]).then(() => gitRun(root, ['stash', 'pop']));
+      return { ok: false, error: 'git worktree add failed: ' + add.err };
+    }
+    let note = '';
+    if (stashed) {
+      const pop = await gitRun(target, ['stash', 'pop']);
+      if (!pop.ok) note = 'Uncommitted changes are in `git stash` (could not apply cleanly): ' + pop.err;
+    }
+    // Untracked env files at the repo root don't come with a worktree; the dev server needs them.
+    try {
+      for (const f of fs.readdirSync(root)) {
+        if (/^\.env(\..+)?$/.test(f) && !fs.existsSync(path.join(target, f))) fs.copyFileSync(path.join(root, f), path.join(target, f));
+      }
+    } catch (_) {}
+    return { ok: true, dir: target, branch, created: !exists, note };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+// Carry a Claude conversation over to a new folder. Claude Code keeps each transcript
+// under ~/.claude/projects/<encoded cwd>/<sessionId>.jsonl and only resumes from the
+// folder it started in, so the transcript is copied to the new folder's slot; the
+// renderer then respawns the tab there with resume { sessionId, cwd }.
+ipcMain.handle(IPC.ACP_RELOCATE, async (_, { id, dir } = {}) => {
+  try {
+    const s = acpSessions.get(id);
+    if (!s || !s.sessionId || s.agent !== 'claude' || !dir) return { ok: false, error: 'not a Claude chat' };
+    const projects = await claudeProjectsDir();
+    if (!projects) return { ok: false, error: 'no Claude config dir' };
+    const enc = (p) => String(p).replace(/[^a-zA-Z0-9]/g, '-');
+    const newCwd = platform.toWslPath(dir);
+    const src = path.join(projects, enc(s.cwd), s.sessionId + '.jsonl');
+    if (!fs.existsSync(src)) return { ok: false, error: 'transcript not found' };
+    const dstDir = path.join(projects, enc(newCwd));
+    fs.mkdirSync(dstDir, { recursive: true });
+    fs.copyFileSync(src, path.join(dstDir, s.sessionId + '.jsonl'));
+    return { ok: true, resume: { sessionId: s.sessionId, cwd: newCwd } };
+  } catch (e) { return { ok: false, error: e.message }; }
+});
 
 // Poll the active project for two new-work signals: a branch switch, and a repo
 // cloned next to it. Cheap (one file read + one shallow readdir); avoids fs.watch
@@ -3349,7 +3468,7 @@ async function spawnAcpSession(id, modelOverride = '', agentKey = 'claude', resu
     connected = true;
     // ACP session modes (Claude Code's permission modes: default/acceptEdits/plan/
     // bypassPermissions). Advertised by capable agents; absent for the rest.
-    const entry = { proc, conn, sessionId, modes, models };
+    const entry = { proc, conn, sessionId, modes, models, agent: agentKey, cwd: (resume && resume.sessionId && resume.cwd) || platform.toWslPath(dir) };   // agent + cwd: ACP_RELOCATE finds the transcript
     acpSessions.set(id, entry);
     send(IPC.ACP_READY, { id, version: acpVersion, model: acpModel, cwd: acpCwd, agent: agentKey, modes, models });
     conn.closed.then(() => {

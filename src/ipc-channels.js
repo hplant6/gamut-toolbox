@@ -109,6 +109,8 @@ const IPC = Object.freeze({
   RESOLVE_SERVER_DIRS: 'resolve-server-dirs',   // resolve cwd + launch cmd of the process on each port (attribute running servers to a project by folder)
   DIR_INFO: 'dir-info',               // project-ish signals for a folder (git/pkg/branch/remote/name)
   PROJECT_WORK: 'project-work',       // main → renderer: what this project is currently working on (branch / PR title)
+  PROJECT_WORKTREE: 'project-worktree', // renderer → main (invoke): give a branch its own folder (git worktree) for a new project
+  ACP_RELOCATE: 'acp-relocate',       // renderer → main (invoke): carry a Claude conversation over to a new folder so it can resume there
   PROJECT_TRIGGER: 'project-trigger', // main → renderer: a new-work signal (new branch / cloned repo) that may warrant a project
   PROJECT_EXPORT: 'project-export',            // write a portable .cathode bundle for a project
   PROJECT_IMPORT_PICK: 'project-import-pick',  // open + parse a .cathode bundle

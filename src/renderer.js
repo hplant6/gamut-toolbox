@@ -4512,7 +4512,30 @@ ipcRenderer.on(IPC.ACP_READY, (_, { id, version, model, cwd, agent, modes, model
   renderAcpBanner(s, version || '', sessionModelName(s) || model, cwd || '');   // live versioned name ("Opus 5.5") beats settings.json's alias
   if (s === sessions.get(activeId)) { updateModePill(); refreshUsage(); }
   finishModelSwitch(s);  // dismiss "switching…" toast + confirm, if a model switch is pending
+  if (s._afterReady) { const m = s._afterReady; s._afterReady = null; routeToSession(s.id, m); }   // moved into a new folder → tell it
 });
+
+// Move a chat into another folder: its agent restarts THERE with the conversation kept
+// (main copies the Claude transcript to the new folder's slot, then loadSession replays
+// it). Agents whose history can't follow keep running where they are and get told to
+// work in the new folder instead. `message` goes to the agent once it's back.
+async function moveChatInto(s, dir, message) {
+  if (!s) return false;
+  let r = null;
+  if (s.type === 'acp') { try { r = await ipcRenderer.invoke(IPC.ACP_RELOCATE, { id: s.id, dir }); } catch (_) {} }
+  if (!r || !r.ok) { routeToSession(s.id, message + ` Your process is still running in the old folder, so use absolute paths under ${dir}.`); return false; }
+  acpFinalizeStream(s);
+  s.streamEl = null; s.streamTextEl = null; s.streamMsgId = null;
+  clearTimeout(s._trailingTimer); s._trailingWork = false;
+  if (s.msgsEl) s.msgsEl.innerHTML = '';   // loadSession replays the conversation into it
+  s._replaying = true;
+  s._afterReady = message + ' You have been restarted inside that folder with this conversation intact — it is your working directory now.';
+  acpSetStatus(s, 'connecting');
+  if (s.statusTextEl) s.statusTextEl.textContent = 'Moving to the new project folder…';
+  ipcRenderer.send(IPC.ACP_KILL, { id: s.id });
+  ipcRenderer.send(IPC.ACP_SPAWN, { id: s.id, model: s.model, agent: s.agent, resume: r.resume, cwd: dir });
+  return true;
+}
 
 ipcRenderer.on(IPC.ACP_MODEL_CHANGED, (_, { id, currentModelId, error }) => {
   const s = acpSession(id);
@@ -4663,10 +4686,11 @@ function showProjectPrompt({ name, dir, note, branch, onCreate, onStay }) {
     const picked = create ? chosenName() : name;   // read before close() drops the card
     close();
     if (create) {
-      onCreate && onCreate(picked);
-      routeToActiveSession(branch
-        ? `Gamut Toolbox: branch "${branch}" is now tracked as its own project, "${picked}". Carry on in ${dir}.`
-        : `Gamut Toolbox: I created a new project for "${picked}" at ${dir}. Work there from now on.`);
+      // onCreate makes the folder and moves this chat into it — it answers the agent itself.
+      Promise.resolve(onCreate && onCreate(picked)).then((r) => {
+        if (r && r.handled) return;
+        routeToActiveSession(`Gamut Toolbox: I created a new project for "${picked}" at ${dir}. Work there from now on.`);
+      });
     }
     else        { onStay   && onStay();   routeToActiveSession(`Gamut Toolbox: staying in ${here} — treat this as part of the current project.`); }
   };
@@ -10753,7 +10777,10 @@ function interruptActiveSession() {
 
 // Returns true if there was an active session to receive the message.
 function routeToActiveSession(text, display = text, images = [], chips = null) {
-  const s = sessions.get(activeId);
+  return routeToSession(activeId, text, display, images, chips);
+}
+function routeToSession(sid, text, display = text, images = [], chips = null) {
+  const s = sessions.get(sid);
   if (!s) return false;
   if (s.type === 'acp') {
     s._replaying = false;   // a real user turn — history replay (if any) is over; chimes resume
@@ -10766,12 +10793,12 @@ function routeToActiveSession(text, display = text, images = [], chips = null) {
     s._sentSlash = cmds.some(c => c.cmd === firstWord) ? firstWord : null;
     s._turnHadOutput = false;
     acpSetStatus(s, 'thinking');
-    ipcRenderer.send(IPC.ACP_PROMPT, { id: activeId, text });
+    ipcRenderer.send(IPC.ACP_PROMPT, { id: sid, text });
   } else {
     s.term.paste(text);
     // Capture the target id — activeId can change (tab switch) inside the delay,
     // which would fire Enter into a different session's prompt.
-    const targetId = activeId;
+    const targetId = sid;
     setTimeout(() => ipcRenderer.send(IPC.PTY_INPUT, { id: targetId, data: '\r' }), PTY_SEND_DELAY);
   }
   return true;
@@ -13769,18 +13796,24 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
       if (entry && moveChat) { adoptActiveSession(entry.id); activateProjectById(entry.id); }
       renderMenu();
     }
-    // A new branch tracked as its own project — folder is shared, so it's localStorage-only
-    // (no per-folder manifest; true per-branch manifests need worktrees, a later slice).
-    function createBranchProject(t, name, chatFirst = false) {
-      const id = projId(t.dir) + '#' + t.branch;
-      const list = loadProjects();
-      if (!list.some(p => p.id === id)) {
-        list.push({ id, name: (name || '').trim() || `${nameFor(t.dir)} (${t.branch})`, rootDir: t.dir, branch: t.branch, branchScoped: true, repo: t.remote ? { remote: t.remote, branch: t.branch } : undefined, lastActiveAt: Date.now(), chatFirst: chatFirst || undefined });
-        saveProjects(list);
-      }
-      // Switch to it and bring the chat along — that chat is doing the branch's work.
-      adoptActiveSession(id); activateProjectById(id);
+    // A new project always lives in its own folder — never the folder of the project it
+    // came from. A branch of this repo becomes a git worktree next to it (main picks the
+    // folder; the user is only asked whether it's a new project). Returns main's result
+    // ({ dir, branch, … }) or null after telling the user why it failed.
+    async function createWorktreeProject(t, name, { moveChat = false, chatFirst = false } = {}) {
+      const busy = showToast('Creating the project folder…', { spinner: true });
+      let res = null;
+      try { res = await ipcRenderer.invoke(IPC.PROJECT_WORKTREE, { dir: t.dir, branch: t.branch, name }); } catch (e) { res = { ok: false, error: String(e) }; }
+      busy.dismiss();
+      if (!res || !res.ok) { showToast('Could not create the project folder: ' + ((res && res.error) || 'unknown error'), { duration: 8000 }); return null; }
+      const entry = registerProject(res.dir, (name || '').trim() || `${nameFor(t.dir)} (${res.branch})`);
+      if (entry && t.remote) updateProject(entry.id, p => { p.repo = { remote: t.remote, branch: res.branch }; });
+      if (entry && chatFirst) markChatFirst(entry.id);
+      if (entry && moveChat) adoptActiveSession(entry.id);
+      if (entry) activateProjectById(entry.id);
       renderMenu();
+      if (res.note) showToast(res.note, { duration: 10000 });
+      return res;
     }
 
     // Trigger: a dev server running in an unknown, project-ish folder.
@@ -13835,7 +13868,7 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         askClassify({
           question: `Switched to branch “${t.branch}”. Track it as a separate project, or keep it under ${aName}?`,
           buttons: [
-            { label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); createBranchProject(t); } },
+            { label: 'New project', kind: 'primary', onPick: () => { saveDecision(key, 'project'); createWorktreeProject(t, ''); } },
             { label: 'Keep under ' + aName, onPick: () => saveDecision(key, 'keep') },
           ],
         });
@@ -13852,10 +13885,18 @@ if (sbConfig && sbConfig.projectDir) { const sf = document.getElementById('sb-fo
         // so it gets the same weight (and 1/2 shortcuts) as a permission request.
         showProjectPrompt({
           name: nm, dir: t.dir, note: t.note || '', branch: t.branch || '',
-          onCreate: (picked) => {
+          onCreate: async (picked) => {
             saveDecision(key, 'project');
-            if (onBranch) createBranchProject({ ...t, branch: t.branch }, picked, true);
-            else adoptDirAsProject(t.dir, { ...t, name: picked }, true, true);
+            const asker = sessions.get(activeId);   // the chat that signalled — it moves with the project
+            if (onBranch) {
+              const res = await createWorktreeProject(t, picked, { moveChat: true, chatFirst: true });
+              if (!res) { routeToSession(asker && asker.id, `Gamut Toolbox: the user wants "${picked}" as a new project, but its folder could not be created — say so, and carry on here for now.`); return { handled: true }; }
+              await moveChatInto(asker, res.dir, `Gamut Toolbox: "${picked}" is a new project in its own folder, ${res.dir} — a git worktree of this repo on branch "${res.branch}"${res.existed ? ' (it already had one)' : ''}. Work only there; the old folder belongs to the previous project.${res.existed ? '' : ' It is a fresh checkout, so install dependencies before starting a dev server.'}${res.note ? ' ' + res.note : ''}`);
+              return { handled: true };
+            }
+            adoptDirAsProject(t.dir, { ...t, name: picked }, true, true);
+            await moveChatInto(asker, t.dir, `Gamut Toolbox: "${picked}" is a new project at ${t.dir}. Work only there from now on.`);
+            return { handled: true };
           },
           onStay:   () => { saveDecision(key, 'keep'); },
         });
