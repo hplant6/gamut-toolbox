@@ -10483,7 +10483,6 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     commitText();
     closePop();
     tool = name ? TOOL_OF[name] : null;
-    controls.hidden = !tool;
     colorBtn.disabled = tool === 'erase';
     toolBtns.forEach(b => { const on = b.dataset.tool === name; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
     canvas.style.pointerEvents = tool ? 'auto' : 'none';
