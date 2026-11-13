@@ -2980,9 +2980,21 @@ html, body {
 }
 /* Annotation toolbar floating over the bottom-left of the preview */
 .ss-annot-tools {
-  position: absolute; bottom: 12px; left: 12px; z-index: 2;
-  display: flex; gap: 6px; line-height: normal;
+  position: absolute; bottom: 12px; left: 12px; right: 12px; z-index: 2;
+  display: flex; align-items: center; gap: 6px; line-height: normal;
 }
+.ss-annot-tools { pointer-events: none; }   /* the gaps let drawing through; only the controls take clicks */
+.ss-annot-tools > * { flex-shrink: 0; pointer-events: auto; }
+.ss-annot-sep { width: 1px; height: 22px; margin: 0 4px; background: var(--spec-structural); }
+/* Size slider sits on a toolbar-coloured pill so it reads on any screenshot */
+.ss-annot-tools > .ss-size-wrap {
+  flex: 0 1 160px; min-width: 60px; height: 34px; padding: 0 12px; box-sizing: border-box;
+  display: flex; align-items: center;
+  background: var(--spec-toolbar-bg); border: 1px solid var(--spec-structural); border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.ss-size-wrap .dr-slider { width: 100%; min-width: 0; }
+.ss-annot-tools .dr-clear-btn { height: 34px; box-shadow: 0 2px 8px rgba(0,0,0,0.5); }
 .ss-marker-btn {
   width: 34px; height: 34px; padding: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
   display: flex; align-items: center; justify-content: center;
@@ -2992,16 +3004,14 @@ html, body {
 .ss-marker-btn:hover { border-color: var(--spec-text-faint); }
 .ss-marker-btn.active { background: var(--spec-accent); border-color: var(--spec-accent); color: #fff; }
 /* Marker controls (reuse the marker tool styling): wheel + preview/slider + clear */
-#ss-marker-controls { display: flex; align-items: center; gap: 14px; padding: 12px 16px; background: var(--spec-header-bg); border-top: 1px solid var(--spec-header-bg); }
-#ss-marker-controls[hidden] { display: none; }
-#ss-marker-controls .dr-clear-btn { margin-left: 4px; }
 /* Colour circle: shows the current colour at the brush size, opens the wheel popover */
 .ss-color-btn {
-  flex-shrink: 0; width: 34px; height: 34px; padding: 0; box-shadow: none;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--spec-toolbar-bg); border: 1px solid var(--spec-structural); border-radius: 50%;
+  flex-shrink: 0; width: 34px; height: 34px; padding: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  background: var(--spec-toolbar-bg); border: 2px solid var(--spec-structural); border-radius: 50%;
   cursor: pointer; transition: border-color 0.12s;
 }
+.ss-color-btn .dr-swatch { width: 100%; height: 100%; }   /* solid fill of the current colour */
 .ss-color-btn:hover, .ss-color-btn[aria-expanded="true"] { border-color: var(--spec-text-faint); }
 .ss-color-btn:disabled { opacity: 0.35; cursor: default; }   /* eraser: colour is irrelevant */
 .ss-color-pop {

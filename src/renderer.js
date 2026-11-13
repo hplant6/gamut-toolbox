@@ -10265,7 +10265,6 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   const canvas    = document.getElementById('ss-draw-canvas');
   const wrap      = document.getElementById('ss-canvas-wrap');
   const toolBtns  = Array.from(panel.querySelectorAll('#ss-annot-tools [data-tool]'));
-  const controls  = document.getElementById('ss-marker-controls');
   const iroWrap   = document.getElementById('ss-iro');
   const colorBtn  = document.getElementById('ss-color-btn');
   const colorPop  = document.getElementById('ss-color-pop');
@@ -10447,7 +10446,6 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     const r = d / 2, svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d + 2}" height="${d + 2}"><circle cx="${r + 1}" cy="${r + 1}" r="${r}" fill="none" stroke="#000" stroke-width="1.5"/><circle cx="${r + 1}" cy="${r + 1}" r="${r - 0.5}" fill="none" stroke="#fff" stroke-width="1"/></svg>`;
     canvas.style.setProperty('cursor', `url("data:image/svg+xml;base64,${btoa(svg)}") ${r + 1} ${r + 1}, cell`);
   }
-  function setSwatchSize(size) { const d = Math.round(6 + (size / 20) * 20); swatch.style.width = d + 'px'; swatch.style.height = d + 'px'; }   // fits the 34px circle
   function buildIro() {
     if (!window.iro || ssIro || !iroWrap) return;
     try {
@@ -10494,7 +10492,7 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     const active = b.classList.contains('active');
     setTool(active ? null : b.dataset.tool);
   }));
-  sizeIn.addEventListener('input', () => { lineWidth = +sizeIn.value; setSwatchSize(lineWidth); if (tool === 'erase') eraserCursor(); });
+  sizeIn.addEventListener('input', () => { lineWidth = +sizeIn.value; if (tool === 'erase') eraserCursor(); });
   clearBtn.addEventListener('click', () => { cancelText(); shapes = []; cur = null; redraw(); });
   // Ctrl/Cmd+Z: undo the last annotation (not while typing in the instruction box or a label)
   document.addEventListener('keydown', (e) => {
@@ -10521,7 +10519,7 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     instr.value = '';
     color = '#ff3b30'; lineWidth = 4;
     if (ssIro) { try { ssIro.color.hexString = color; } catch (_) {} }
-    sizeIn.value = 4; setSwatchSize(4); swatch.style.background = color;
+    sizeIn.value = 4; swatch.style.background = color;
     setTool(null);
     panel.hidden = false;
     setTimeout(() => instr.focus(), 0);
