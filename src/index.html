@@ -651,9 +651,23 @@
           <div id="ss-canvas-wrap">
             <img id="ss-preview-img" alt="Screenshot preview" />
             <canvas id="ss-draw-canvas"></canvas>
-            <button id="ss-marker-toggle" class="ss-marker-btn" title="Draw on the screenshot">
-              <svg viewBox="0 0 18 18" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 3.5l3 3-7.5 7.5-3.5 .5 .5-3.5z"/><path d="M10 5l3 3"/></svg>
-            </button>
+            <div id="ss-annot-tools" class="ss-annot-tools" role="toolbar" aria-label="Annotate screenshot">
+              <button class="ss-marker-btn" data-tool="marker" title="Marker — hold Shift for a straight line" aria-label="Marker — hold Shift for a straight line" aria-pressed="false">
+                <svg viewBox="0 0 18 18" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 3.5l3 3-7.5 7.5-3.5 .5 .5-3.5z"/><path d="M10 5l3 3"/></svg>
+              </button>
+              <button class="ss-marker-btn" data-tool="line" title="Line — hold Shift to snap to 45°" aria-label="Line — hold Shift to snap to 45°" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M7 17L17 7"/><rect x="17" y="3" width="4" height="4"/><rect x="3" y="17" width="4" height="4"/></svg>
+              </button>
+              <button class="ss-marker-btn" data-tool="arrow" title="Arrow — hold Shift to snap to 45°" aria-label="Arrow — hold Shift to snap to 45°" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-miterlimit="10" stroke-linecap="square"><path d="M4.49997 19.5L19.0502 4.94973L18.6967 5.30329"/><path d="M19.7573 14.1421C16.9289 11.3137 17.636 7.77818 19.4038 5.30331L18.6967 4.5962C16.2218 6.36397 12.6863 7.07107 9.85785 4.24265"/></svg>
+              </button>
+              <button class="ss-marker-btn" data-tool="text" title="Text label — click to place, Enter to finish" aria-label="Text label — click to place, Enter to finish" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M9 3V21H7V3H9Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M1 3H15V5H1V3Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M18 10V21H16V10H18Z"/><path fill-rule="evenodd" clip-rule="evenodd" d="M12 10H22V12H12V10Z"/></svg>
+              </button>
+              <button class="ss-marker-btn" data-tool="eraser" title="Eraser" aria-label="Eraser" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-miterlimit="10" stroke-linecap="square"><path d="M11 21L21 21"/><path d="M8.5 10L15.5 17" stroke-linecap="butt"/><path d="M22.2635 10.3934L15.1924 3.32238L1.75738 16.7574L6.00002 21L11.6569 21L22.2635 10.3934Z"/></svg>
+              </button>
+            </div>
           </div>
           <div id="ss-marker-controls" hidden>
             <div id="ss-iro" class="dr-wheel"></div>
@@ -664,7 +678,7 @@
                 <input id="ss-size" type="range" class="rz-slider dr-slider" min="1" max="20" value="4" />
               </div>
             </div>
-            <button id="ss-clear" class="dr-clear-btn">Clear Marker</button>
+            <button id="ss-clear" class="dr-clear-btn">Clear All</button>
           </div>
         </div>
         <div id="ss-panel-foot" class="tp-foot">

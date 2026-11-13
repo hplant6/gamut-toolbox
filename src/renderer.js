@@ -10263,7 +10263,8 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   if (!panel) return;
   const img       = document.getElementById('ss-preview-img');
   const canvas    = document.getElementById('ss-draw-canvas');
-  const markerBtn = document.getElementById('ss-marker-toggle');
+  const wrap      = document.getElementById('ss-canvas-wrap');
+  const toolBtns  = Array.from(panel.querySelectorAll('#ss-annot-tools [data-tool]'));
   const controls  = document.getElementById('ss-marker-controls');
   const iroWrap   = document.getElementById('ss-iro');
   const swatch    = document.getElementById('ss-swatch');
@@ -10274,9 +10275,19 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   const cancelBtn = document.getElementById('ss-cancel');
   const newBtn    = document.getElementById('ss-new');
   const ctx = canvas.getContext('2d');
-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
-  let markerMode = false, drawing = false, color = '#ff3b30', lineWidth = 4, lastX = 0, lastY = 0, hasDrawing = false, ssIro = null;
+  // Annotations are kept as a list of shapes (canvas-pixel coords) and replayed onto the
+  // canvas on every change: that's what lets a line/arrow preview while dragging, the
+  // eraser cut through marker strokes only (destination-out on the annotation layer, never
+  // the screenshot), and Ctrl+Z pop the last shape.
+  //   pen    { pts:[{x,y}], color, w }          marker; Shift = straight segment
+  //   line / arrow { a:{x,y}, b:{x,y}, color, w }  Shift snaps to 45°
+  //   text   { x, y, text, color, size }       white (or dark) text on a colour block
+  //   erase  { pts:[{x,y}], w }
+  const LABEL_FONT = "700 {px}px 'Zalando Sans SemiExpanded', system-ui, sans-serif";   // the app's title face (already loaded)
+  let tool = null, color = '#ff3b30', lineWidth = 4, ssIro = null;
+  let shapes = [], cur = null, textEdit = null;
+  const hasDrawing = () => shapes.length > 0;
 
   function fitCanvas() {
     // Size the canvas to the *displayed* image (× dpr) so strokes are crisp even
@@ -10287,42 +10298,192 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
     canvas.width  = Math.max(1, Math.round(cw * dpr));
     canvas.height = Math.max(1, Math.round(cw * ar * dpr));
   }
+  // canvas pixels per CSS pixel — brush sizes are in CSS px so they look the same at any zoom
+  function scale() { const r = canvas.getBoundingClientRect(); return r.width ? canvas.width / r.width : 1; }
   function toCanvas(e) { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * (canvas.width / r.width), y: (e.clientY - r.top) * (canvas.height / r.height) }; }
+  function snap45(a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+    const ang = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+    return { x: a.x + Math.cos(ang) * len, y: a.y + Math.sin(ang) * len };
+  }
+  // White text unless the block colour is light enough that white would wash out.
+  function labelInk(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || ''); if (!m) return '#fff';
+    const n = parseInt(m[1], 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 170 ? '#111' : '#fff';
+  }
+  function labelFontPx(w) { return 12 + Math.round(w * 1.2); }   // size slider 1–20 → 13–36px
+
+  function strokePath(pts, w) {
+    if (pts.length === 1) { ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, w / 2, 0, Math.PI * 2); ctx.fill(); return; }
+    ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+  }
+  function drawShape(sh) {
+    ctx.save();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (sh.type === 'erase') { ctx.globalCompositeOperation = 'destination-out'; ctx.strokeStyle = ctx.fillStyle = '#000'; strokePath(sh.pts, sh.w); }
+    else if (sh.type === 'pen') {
+      ctx.strokeStyle = ctx.fillStyle = sh.color;
+      strokePath(sh.tail ? sh.pts.concat([sh.tail]) : sh.pts, sh.w);
+    } else if (sh.type === 'line' || sh.type === 'arrow') {
+      ctx.strokeStyle = ctx.fillStyle = sh.color;
+      const { a, b, w } = sh, ang = Math.atan2(b.y - a.y, b.x - a.x);
+      const head = sh.type === 'arrow' ? Math.max(w * 3.5, 12 * sh.k) : 0;
+      // stop the shaft short of the tip so the round cap doesn't poke through the head
+      const len = Math.hypot(b.x - a.x, b.y - a.y), cut = Math.min(head * 0.8, len);
+      const end = { x: b.x - Math.cos(ang) * cut, y: b.y - Math.sin(ang) * cut };
+      strokePath([a, head ? end : b], w);
+      if (head && len > 0) {
+        const spread = Math.PI / 7;
+        ctx.beginPath(); ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.x - head * Math.cos(ang - spread), b.y - head * Math.sin(ang - spread));
+        ctx.lineTo(b.x - head * Math.cos(ang + spread), b.y - head * Math.sin(ang + spread));
+        ctx.closePath(); ctx.fill();
+      }
+    } else if (sh.type === 'text') {
+      const px = sh.size, pad = Math.round(px * 0.35), lines = sh.text.split('\n'), lh = Math.round(px * 1.2);
+      ctx.font = LABEL_FONT.replace('{px}', px); ctx.textBaseline = 'top';
+      const w = Math.max(...lines.map(l => ctx.measureText(l).width));
+      ctx.fillStyle = sh.color;
+      ctx.beginPath(); ctx.roundRect(sh.x, sh.y, w + pad * 2, lh * lines.length + pad * 2, Math.round(px * 0.2)); ctx.fill();
+      ctx.fillStyle = labelInk(sh.color);
+      lines.forEach((l, i) => ctx.fillText(l, sh.x + pad, sh.y + pad + i * lh + Math.round((lh - px) / 2)));
+    }
+    ctx.restore();
+  }
+  function redraw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    shapes.forEach(drawShape);
+    if (cur) drawShape(cur);
+  }
+
+  // ── Pointer ──
   function onDown(e) {
-    if (!markerMode) return;
-    drawing = true; hasDrawing = true;
-    const p = toCanvas(e); lastX = p.x; lastY = p.y;
-    ctx.beginPath(); ctx.arc(lastX, lastY, lineWidth / 2, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    if (!tool || e.button !== 0) return;
+    e.preventDefault();
+    const p = toCanvas(e), k = scale(), w = lineWidth * k;
+    if (tool === 'text') { startTextEdit(p); return; }
+    if (tool === 'pen')   cur = { type: 'pen', pts: [p], color, w };
+    if (tool === 'erase') cur = { type: 'erase', pts: [p], w: Math.max(lineWidth * 3, 10) * k };
+    if (tool === 'line' || tool === 'arrow') cur = { type: tool, a: p, b: p, color, w, k };
+    redraw();
   }
   function onMove(e) {
-    if (!drawing) return;
+    if (!cur) return;
     const p = toCanvas(e);
-    ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
-    ctx.beginPath(); ctx.moveTo(lastX, lastY); ctx.lineTo(p.x, p.y); ctx.stroke();
-    lastX = p.x; lastY = p.y;
+    if (cur.type === 'pen') {
+      // Shift: the tail runs straight from the last committed point; letting go of Shift
+      // pins that segment and freehand resumes from its end.
+      if (e.shiftKey) cur.tail = p;
+      else { if (cur.tail) { cur.pts.push(cur.tail); cur.tail = null; } cur.pts.push(p); }
+    } else if (cur.type === 'erase') cur.pts.push(p);
+    else cur.b = e.shiftKey ? snap45(cur.a, p) : p;
+    redraw();
+  }
+  function onUp() {
+    if (!cur) return;
+    if (cur.tail) { cur.pts.push(cur.tail); cur.tail = null; }
+    const degenerate = (cur.type === 'line' || cur.type === 'arrow') && Math.hypot(cur.b.x - cur.a.x, cur.b.y - cur.a.y) < 2;
+    if (!degenerate) shapes.push(cur);
+    cur = null; redraw();
   }
   canvas.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', () => { drawing = false; });
+  window.addEventListener('mouseup', onUp);
 
+  // ── Text labels: an in-place input styled like the finished label ──
+  function startTextEdit(p) {
+    commitText();
+    const k = scale(), px = labelFontPx(lineWidth), pad = Math.round(px * 0.35);
+    const ta = document.createElement('textarea');
+    ta.className = 'ss-text-input'; ta.rows = 1; ta.spellcheck = false;
+    ta.style.left = (p.x / k) + 'px'; ta.style.top = (p.y / k) + 'px';
+    ta.style.font = LABEL_FONT.replace('{px}', px);
+    ta.style.padding = pad + 'px'; ta.style.borderRadius = Math.round(px * 0.2) + 'px';
+    ta.style.background = color; ta.style.color = labelInk(color);
+    const autosize = () => {
+      const lines = ta.value.split('\n');
+      ctx.font = LABEL_FONT.replace('{px}', px);   // same font as the finished label → same width
+      ta.style.width = Math.ceil(Math.max(px * 0.6, ...lines.map(l => ctx.measureText(l).width)) + 2) + 'px';
+      ta.style.height = (lines.length * Math.round(px * 1.2)) + 'px';
+      // keep it inside the image
+      const maxLeft = wrap.clientWidth - ta.offsetWidth;
+      if (ta.offsetLeft > maxLeft) ta.style.left = Math.max(0, maxLeft) + 'px';
+    };
+    ta.addEventListener('input', autosize);
+    ta.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitText(); }   // Shift+Enter = new line
+      else if (e.key === 'Escape') { e.preventDefault(); cancelText(); }
+    });
+    ta.addEventListener('blur', () => commitText());
+    wrap.appendChild(ta);
+    textEdit = { ta, x: p.x, y: p.y, color, size: Math.round(px * k) };
+    autosize();
+    ta.focus();   // explicit focus survives the mousedown preventDefault
+  }
+  function commitText() {
+    if (!textEdit) return;
+    const t = textEdit; textEdit = null;
+    const text = t.ta.value.replace(/\s+$/, '');
+    // Measure the input's real left (it may have been nudged in from the right edge).
+    const x = t.ta.offsetLeft * scale();
+    t.ta.remove();
+    if (text) { shapes.push({ type: 'text', x, y: t.y, text, color: t.color, size: t.size }); redraw(); }
+  }
+  function cancelText() { if (!textEdit) return; const t = textEdit; textEdit = null; t.ta.remove(); }
+
+  // ── Toolbar ──
+  const TOOL_OF = { marker: 'pen', line: 'line', arrow: 'arrow', text: 'text', eraser: 'erase' };
+  let eraserCursorFor = 0;
+  function eraserCursor() {
+    const d = Math.min(120, Math.max(8, Math.round(Math.max(lineWidth * 3, 10))));
+    if (d === eraserCursorFor) return;
+    eraserCursorFor = d;
+    const r = d / 2, svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${d + 2}" height="${d + 2}"><circle cx="${r + 1}" cy="${r + 1}" r="${r}" fill="none" stroke="#000" stroke-width="1.5"/><circle cx="${r + 1}" cy="${r + 1}" r="${r - 0.5}" fill="none" stroke="#fff" stroke-width="1"/></svg>`;
+    canvas.style.setProperty('cursor', `url("data:image/svg+xml;base64,${btoa(svg)}") ${r + 1} ${r + 1}, cell`);
+  }
   function setSwatchSize(size) { const d = Math.round(6 + (size / 20) * 24); swatch.style.width = d + 'px'; swatch.style.height = d + 'px'; }
   function buildIro() {
     if (!window.iro || ssIro || !iroWrap) return;
     try {
       ssIro = new iro.ColorPicker(iroWrap, { width: 90, color, layout: [{ component: iro.ui.Wheel }] });
-      ssIro.on('color:change', (c) => { color = c.hexString; swatch.style.background = color; });
+      ssIro.on('color:change', (c) => {
+        color = c.hexString; swatch.style.background = color;
+        if (textEdit) { textEdit.color = color; textEdit.ta.style.background = color; textEdit.ta.style.color = labelInk(color); }
+      });
     } catch (_) {}
   }
-  function setMarkerMode(on) {
-    markerMode = on;
-    controls.hidden = !on;
-    markerBtn.classList.toggle('active', on);
-    canvas.style.pointerEvents = on ? 'auto' : 'none';
-    if (on) buildIro();
+  function setTool(name) {
+    commitText();
+    tool = name ? TOOL_OF[name] : null;
+    controls.hidden = !tool;
+    controls.classList.toggle('is-eraser', tool === 'erase');
+    toolBtns.forEach(b => { const on = b.dataset.tool === name; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    canvas.style.pointerEvents = tool ? 'auto' : 'none';
+    canvas.className = tool ? 'tool-' + tool : '';
+    eraserCursorFor = 0;
+    if (tool === 'erase') eraserCursor(); else canvas.style.removeProperty('cursor');
+    if (tool) buildIro();
   }
-  markerBtn.addEventListener('click', () => setMarkerMode(!markerMode));
-  sizeIn.addEventListener('input', () => { lineWidth = +sizeIn.value; setSwatchSize(lineWidth); });
-  clearBtn.addEventListener('click', () => { ctx.clearRect(0, 0, canvas.width, canvas.height); hasDrawing = false; });
+  toolBtns.forEach(b => b.addEventListener('click', () => {
+    const active = b.classList.contains('active');
+    setTool(active ? null : b.dataset.tool);
+  }));
+  // Recolouring a label mid-edit: keep focus in the label so the wheel doesn't commit it.
+  controls.addEventListener('mousedown', (e) => { if (textEdit && !e.target.closest('input, button')) e.preventDefault(); }, true);
+  sizeIn.addEventListener('input', () => { lineWidth = +sizeIn.value; setSwatchSize(lineWidth); if (tool === 'erase') eraserCursor(); });
+  clearBtn.addEventListener('click', () => { cancelText(); shapes = []; cur = null; redraw(); });
+  // Ctrl/Cmd+Z: undo the last annotation (not while typing in the instruction box or a label)
+  document.addEventListener('keydown', (e) => {
+    if (panel.hidden || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return;
+    const ae = document.activeElement;
+    if (ae === instr || (textEdit && ae === textEdit.ta)) return;
+    if (!shapes.length) return;
+    e.preventDefault(); shapes.pop(); redraw();
+  });
 
   function composite() {
     const off = document.createElement('canvas');
@@ -10334,17 +10495,20 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   }
   function open(data) {
     clearPickMode();
-    img.onload = () => { fitCanvas(); ctx.clearRect(0, 0, canvas.width, canvas.height); };
+    cancelText(); shapes = []; cur = null;
+    img.onload = () => { fitCanvas(); redraw(); };
     img.src = data.dataUrl || '';
     instr.value = '';
-    color = '#ff3b30'; lineWidth = 4; hasDrawing = false;
+    color = '#ff3b30'; lineWidth = 4;
+    if (ssIro) { try { ssIro.color.hexString = color; } catch (_) {} }
     sizeIn.value = 4; setSwatchSize(4); swatch.style.background = color;
-    setMarkerMode(false);
+    setTool(null);
     panel.hidden = false;
     setTimeout(() => instr.focus(), 0);
   }
-  function close() { panel.hidden = true; img.removeAttribute('src'); instr.value = ''; ctx.clearRect(0, 0, canvas.width, canvas.height); setMarkerMode(false); }
+  function close() { cancelText(); shapes = []; cur = null; panel.hidden = true; img.removeAttribute('src'); instr.value = ''; ctx.clearRect(0, 0, canvas.width, canvas.height); setTool(null); }
   function send() {
+    commitText();
     const _foot = instr.closest('.tp-foot');
     ipcRenderer.send(IPC.SCREENSHOT_PANEL_SEND, { instruction: decorateToolInstruction(instr.value.trim(), _foot), compositeDataUrl: hasDrawing ? composite() : null });
     close();
@@ -10355,7 +10519,7 @@ ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
   cancelBtn.addEventListener('click', cancel);
   newBtn?.addEventListener('click', () => { pickMode = 'screenshot'; ipcRenderer.send(IPC.PICK_SCREENSHOT); });
   instr.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
-  addPanelEscClose(panel, cancel, el => el === instr);
+  addPanelEscClose(panel, cancel, el => el === instr || !!(textEdit && el === textEdit.ta));
 
   ipcRenderer.on(IPC.SCREENSHOT_PANEL_OPEN, (_, data) => open(data || {}));
 })();
