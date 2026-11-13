@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-11-13
+
+### Added
+- **Annotate screenshots.** The Screenshot tool has a toolbar on the image: **Marker**, **Line**, **Arrow**, **Text** and **Eraser**, with the colour, size and **Clear All** on the same row. Hold Shift with the Marker to draw a straight line, or with Line and Arrow to snap to 45°. Text labels are bold white text on the current colour (dark text on light colours), so they stand out for the agent. The Eraser only removes your marks, never the screenshot. Ctrl+Z (Cmd+Z on Mac) undoes the last mark. Click the colour circle to pick a colour.
+
+### Changed
+- **A new project always gets its own folder.** Say yes to "Start a new project?" for a new branch and Gamut creates a folder for it next to the repo (a git worktree on that branch), switches to it, and restarts the chat's agent inside it with the conversation kept. You're never asked where it goes. If the branch was already checked out in the old folder, it moves out along with its uncommitted changes, and the old folder goes back to the branch it was on. Branch projects used to share the original project's folder, so their agent opened there and edited whatever branch happened to be checked out.
+
+### Fixed
+- **Tools work while the page is loading.** While a dev server spent minutes rebuilding, every page tool silently did nothing until the load finished. They now work on whatever page is on screen.
+- **A page reload no longer throws away your work in progress.** When the agent's edits reloaded the page, open tool panels (and anything typed in them) were closed and the armed tool got stuck. Panels now stay open through a reload of the same page and the tool re-arms itself, so you can line up the next change while the agent works. Going to a different page still closes them.
+
 ## [1.21.0] - 2026-11-10
 
 ### Added
