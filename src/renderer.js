@@ -7241,7 +7241,8 @@ ipcRenderer.on(IPC.DEVTOOLS_CLOSED, () => devToolsBtn?.classList.remove('active'
 
 // ── Pick mode ─────────────────────────────────────────────────────
 let pickMode = null;
-let lastDrawMode = 'box';   // remembers box vs lasso for the panel's "New Selection" button
+let lastDrawMode = 'box';
+let lastPickOpts = null;   // remembers box vs lasso for the panel's "New Selection" button
 
 function applyPickCursor(mode) {
   document.documentElement.setAttribute('data-pick', mode || '');
@@ -7255,6 +7256,7 @@ function setPickMode(mode, opts) {
     return;
   }
   pickMode = mode;
+  lastPickOpts = opts || null;   // a reload re-arms with the same options (Add to Selection)
   ipcRenderer.send(IPC.SLIDERS_SUSPEND, { on: true });   // a pinned Sliders panel would intercept the pick
   if (mode === 'box' || mode === 'lasso') lastDrawMode = mode;
   applyPickCursor(mode);
@@ -7409,10 +7411,20 @@ function clearPickMode() {
 ipcRenderer.on(IPC.PICK_CANCELLED, () => clearPickMode());
 
 // Full page navigation → cancel any armed pick and dismiss stale result panels.
-ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, () => {
-  if (pickMode) ipcRenderer.send(IPC.PICK_CANCEL);
-  clearPickMode();
-  dismissOpenToolPanels();
+// A reload of the same page (a dev server's full reload while the agent edits) is
+// different: open panels still describe this page, so they stay, and a tool that was
+// armed is re-armed on the new document — so the next change can be lined up while the
+// agent works. Move/A11y/Drift aren't re-armed: their state was the old page itself.
+const REARM_BUTTON = { screenshot: 'btn-screenshot', eyedropper: 'btn-pick-eyedropper', animate: 'btn-pick-animate', draw: 'btn-draw' };
+ipcRenderer.on(IPC.BROWSER_DID_NAVIGATE, (_, info) => {
+  const reload = !!(info && info.reload);
+  const mode = pickMode, opts = lastPickOpts;
+  clearPickMode();   // the old page's overlay died with it — no PICK_CANCEL needed
+  if (!reload) { dismissOpenToolPanels(); return; }
+  if (window.__drawRearmAfterReload?.()) return;
+  if (!mode) return;
+  if (mode === 'box' || mode === 'lasso' || mode === 'aidev') setPickMode(mode, opts);
+  else if (REARM_BUTTON[mode]) document.getElementById(REARM_BUTTON[mode])?.click();
 });
 
 // ── Box/Lasso element panel (overtakes the chat column) ──────────
@@ -11284,6 +11296,16 @@ let openDrawPanel = null;
   addPanelEscClose(panel, cancel, el => el === instr);
 
   ipcRenderer.on(IPC.DRAW_PANEL_OPEN, () => open());
+  // The page reloaded under an open Marker panel: put a fresh marker layer on the new
+  // page with the same brush, and leave the panel (and what's typed in it) alone.
+  window.__drawRearmAfterReload = () => {
+    if (panel.hidden) return false;
+    ipcRenderer.send(IPC.PICK_DRAW, { rearm: true });
+    const c = drawIro ? drawIro.color.hexString : (swatch && swatch.style.background) || '';
+    if (c) ipcRenderer.send(IPC.MARKER_SET_COLOR, c);
+    if (sizeIn) ipcRenderer.send(IPC.MARKER_SET_SIZE, +sizeIn.value);
+    return true;
+  };
 })();
 
 ipcRenderer.on(IPC.DRAW_COMPOSITE, async (_, { pageB64, canvasDataUrl, instructions = '' }) => {

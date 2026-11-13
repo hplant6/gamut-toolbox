@@ -176,7 +176,35 @@ const SB_BAR_HEIGHT     = 46;   /* Storybook instance bar height (matches #sb-ba
 const POPUP_BAR_HEIGHT  = 36;
 
 // Safe send to the main renderer — async handlers can outlive the window.
+// ── Page scripts that run during loads ───────────────────────────────
+// Run a script in a page view NOW, in whatever document is on screen. Electron's
+// webContents.executeJavaScript waits for did-stop-loading, so while a dev server spent
+// minutes compiling a reload, every tool silently hung. mainFrame.executeJavaScript runs
+// immediately: in the old page until the new one commits, then in the new (still
+// streaming) one. A script still pending when the page navigates (a tool waiting for a
+// click) would otherwise never settle — its document is gone — so it rejects with
+// err.pageReloaded and the renderer re-arms the tool on the new page.
+function pageJS(wc, code, gesture = false) {
+  let frame = null;
+  try { frame = wc && !wc.isDestroyed() ? wc.mainFrame : null; } catch (_) {}
+  let run;
+  try { run = frame ? frame.executeJavaScript(code, gesture) : wc.executeJavaScript(code, gesture); }
+  catch (err) { return Promise.reject(err); }
+  return new Promise((resolve, reject) => {
+    const onNav = () => { const e = new Error('page reloaded'); e.pageReloaded = true; reject(e); };
+    wc.once('did-navigate', onNav);
+    run.then(resolve, reject).finally(() => { try { wc.removeListener('did-navigate', onNav); } catch (_) {} });
+  });
+}
+
+// While the browser page navigates, tools that were waiting on the old document reject
+// (pageJS → pageReloaded) and their catch blocks report PICK_CANCELLED. The renderer
+// already handles that navigation itself (BROWSER_DID_NAVIGATE re-arms or clears the
+// tool), so those cancels are dropped for a moment — one arriving after a re-arm would
+// disarm the fresh tool.
+let muteNavCancelsUntil = 0;
 function uiSend(channel, data) {
+  if (channel === IPC.PICK_CANCELLED && Date.now() < muteNavCancelsUntil) return;
   try {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, data);
   } catch (err) {
@@ -562,7 +590,14 @@ function createWindow() {
   browserView.webContents.on('did-stop-loading',  () => { if (!browserLoadFailed) uiSend(IPC.BROWSER_LOADING, 'done'); sendNavState(); });
   browserView.webContents.on('did-fail-load', (_, code, desc, url, isMainFrame) => { if (isMainFrame && code !== -3) { browserLoadFailed = true; uiSend(IPC.BROWSER_LOADING, 'error'); } });   // -3 = ABORTED (navigation replaced), ignore
 
+  let lastNavUrl = browserView.webContents.getURL() || '';
   browserView.webContents.on('did-navigate', (_, url) => {
+    // Same address (ignoring #hash) = a reload — dev-server HMR full reloads land here
+    // while an agent edits. Tool panels still describe this page, so they stay open.
+    const strip = (u) => String(u || '').split('#')[0];
+    const reload = !!lastNavUrl && strip(url) === strip(lastNavUrl);
+    lastNavUrl = url;
+    muteNavCancelsUntil = Date.now() + 1500;
     resetCDP();
     saveLastURL(url);
     pushHistory(url);   // record for address-bar suggestions (top-level nav only)
@@ -570,7 +605,7 @@ function createWindow() {
     // Full navigation destroys the page context — any open tool result panel now
     // describes the OLD page. Tell the renderer to reset tools. (Not fired for
     // did-navigate-in-page: SPA/hash changes keep the same document.)
-    uiSend(IPC.BROWSER_DID_NAVIGATE);
+    uiSend(IPC.BROWSER_DID_NAVIGATE, { reload });
     sendNavState();
     // Reconnect embedded DevTools after full navigation (WebSocket target URL may change)
     if (devToolsView) {
@@ -711,7 +746,7 @@ function openInlinePopup(url) {
   try { mainRoot = rootDomain(new URL(browserView.webContents.getURL()).hostname); } catch (_) {}
 
   // Backdrop injected into the main browser page
-  browserView.webContents.executeJavaScript(`
+  pageJS(browserView.webContents, `
     (function() {
       if (document.getElementById('__cathode_backdrop__')) return;
       const bd = document.createElement('div');
@@ -773,7 +808,7 @@ function closeInlinePopup(removeBackdrop = true) {
   if (popupBarView)     { mainWindow.contentView.removeChildView(popupBarView);     freeView(popupBarView);     popupBarView = null; }
   if (popupContentView) { mainWindow.contentView.removeChildView(popupContentView); freeView(popupContentView); popupContentView = null; }
   if (removeBackdrop) {
-    browserView.webContents.executeJavaScript(
+    pageJS(browserView.webContents, 
       `const bd=document.getElementById('__cathode_backdrop__');if(bd)bd.remove();`
     ).catch(() => {});
   }
@@ -5146,7 +5181,7 @@ ipcMain.handle(IPC.EXPORT_PREPARE, async (_, { metaOnly = false, reveal = false 
   if (!b || b.width < 50 || b.height < 50) return { ok: false, error: 'The page is hidden' };
   const device = deviceEmulation && deviceEmulation.name ? deviceEmulation.name : '';
   if (metaOnly) {   // quick re-export: just enough to name the file
-    try { return { ok: true, metrics: await view.webContents.executeJavaScript('({ vw: innerWidth, vh: innerHeight, ch: Math.max(document.documentElement.scrollHeight, innerHeight), title: document.title || "", url: location.href })', true), device }; }
+    try { return { ok: true, metrics: await pageJS(view.webContents, '({ vw: innerWidth, vh: innerHeight, ch: Math.max(document.documentElement.scrollHeight, innerHeight), title: document.title || "", url: location.href })', true), device }; }
     catch (e) { return { ok: false, error: e.message }; }
   }
   const t = exporter.targetFor(view.webContents);
@@ -5177,7 +5212,7 @@ ipcMain.handle(IPC.EXPORT_RUN, async (_, { opts = {}, filePath } = {}) => {
   // The dialog has just closed: wait for the view to come back from its offscreen park and
   // present a frame, or the capture races the restore.
   for (let i = 0; i < 40 && (modalOpen || view.getBounds().width < 50); i++) await exportDelay(50);
-  try { await view.webContents.executeJavaScript('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))', true); } catch (_) {}
+  try { await pageJS(view.webContents, 'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))', true); } catch (_) {}
   for (let left = opts.delay || 0; left > 0; left--) {
     if (exportCancelled) return { ok: false, cancelled: true };
     uiSend(IPC.EXPORT_PROGRESS, { phase: 'delay', left });
@@ -5230,7 +5265,7 @@ ipcMain.on(IPC.PICK_START, async (_, mode, opts) => {
   const selId = (mode === 'box' || mode === 'lasso') ? ++panelSelSeq : 0;
   try {
     // Phase 1: user draws selection
-    const picked = await view.webContents.executeJavaScript(getPickerScript(mode));
+    const picked = await pageJS(view.webContents, getPickerScript(mode));
     if (!picked) { uiSend(IPC.PICK_CANCELLED); return; }
 
     const { cx, cy, mouseUpX, mouseUpY, bounds, mode: pickedMode, wholePage } = picked;
@@ -5239,7 +5274,7 @@ ipcMain.on(IPC.PICK_START, async (_, mode, opts) => {
     // persistent highlight and returns immediately, keeping live DOM refs alive).
     const usePanel = (mode === 'box' || mode === 'lasso' || mode === 'aidev');
 
-    const result = await view.webContents.executeJavaScript(
+    const result = await pageJS(view.webContents, 
       getCombinedScript({
         isClick: pickedMode === 'click',
         bounds, cx, cy,
@@ -5336,7 +5371,7 @@ let pendingPanelPick = null;   // { view, items, cssRefs }
 async function clearPanelHighlight(view) {
   const wc = (view || (pendingPanelPick && pendingPanelPick.view) || {}).webContents;
   if (!wc || wc.isDestroyed()) return;
-  try { await wc.executeJavaScript('window.__cathodePanel && window.__cathodePanel.clear()'); } catch (_) {}
+  try { await pageJS(wc, 'window.__cathodePanel && window.__cathodePanel.clear()'); } catch (_) {}
 }
 // resize: the one focused element that gets on-page resize handles (null → none). While
 // handles are up, poll for finished drags and hand them to the drawer.
@@ -5348,7 +5383,7 @@ function startPanelSizePoll(p) {
   panelSizeTimer = setInterval(async () => {
     if (pendingPanelPick !== p || !p.view || p.view.webContents.isDestroyed()) { stopPanelSizePoll(); return; }
     let st = null;
-    try { st = await p.view.webContents.executeJavaScript('window.__cathodePanel && window.__cathodePanel.sizeState ? window.__cathodePanel.sizeState() : null'); } catch (_) {}
+    try { st = await pageJS(p.view.webContents, 'window.__cathodePanel && window.__cathodePanel.sizeState ? window.__cathodePanel.sizeState() : null'); } catch (_) {}
     if (st) uiSend(IPC.PICK_PANEL_SIZE, { i: st.i, props: st.props });
   }, 150);
 }
@@ -5356,12 +5391,12 @@ ipcMain.on(IPC.PICK_PANEL_UPDATE, async (_, { active, resize } = {}) => {
   const p = pendingPanelPick;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return;
   const rz = Number.isInteger(resize) ? resize : null;
-  try { await p.view.webContents.executeJavaScript(`window.__cathodePanel && window.__cathodePanel.set(${JSON.stringify(active || [])}, ${rz === null ? 'null' : rz})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodePanel && window.__cathodePanel.set(${JSON.stringify(active || [])}, ${rz === null ? 'null' : rz})`); } catch (_) {}
   if (rz !== null) { if (panelSizeFor !== p) startPanelSizePoll(p); return; }
   if (panelSizeFor === p) {   // handles going away: collect a drag that finished since the last tick
     stopPanelSizePoll();
     try {
-      const st = await p.view.webContents.executeJavaScript('window.__cathodePanel && window.__cathodePanel.sizeState ? window.__cathodePanel.sizeState() : null');
+      const st = await pageJS(p.view.webContents, 'window.__cathodePanel && window.__cathodePanel.sizeState ? window.__cathodePanel.sizeState() : null');
       if (st) uiSend(IPC.PICK_PANEL_SIZE, { i: st.i, props: st.props });
     } catch (_) {}
   }
@@ -5369,7 +5404,7 @@ ipcMain.on(IPC.PICK_PANEL_UPDATE, async (_, { active, resize } = {}) => {
 ipcMain.on(IPC.PICK_PANEL_DROP_SEL, async (_, { selId } = {}) => {
   const p = pendingPanelPick;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return;
-  try { await p.view.webContents.executeJavaScript(`window.__cathodePanel && window.__cathodePanel.dropSelection(${Number(selId) || 0})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodePanel && window.__cathodePanel.dropSelection(${Number(selId) || 0})`); } catch (_) {}
 });
 // Live style edit from a drawer → apply to the actual page element.
 ipcMain.on(IPC.PICK_PANEL_STYLE, async (_, { i, prop, value, state } = {}) => {
@@ -5377,7 +5412,7 @@ ipcMain.on(IPC.PICK_PANEL_STYLE, async (_, { i, prop, value, state } = {}) => {
   if (!p || !p.view || p.view.webContents.isDestroyed()) return;
   const v = (value === null || value === undefined) ? 'null' : JSON.stringify(String(value));
   const st = JSON.stringify(String(state || ''));
-  try { await p.view.webContents.executeJavaScript(`window.__cathodePanel && window.__cathodePanel.style(${Number(i)}, ${JSON.stringify(String(prop))}, ${v}, ${st})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodePanel && window.__cathodePanel.style(${Number(i)}, ${JSON.stringify(String(prop))}, ${v}, ${st})`); } catch (_) {}
 });
 // Re-read an element's computed CSS. Called after forcing a pseudo-state, so the values
 // come back as that state resolves them — the panel diffs them against the resting set.
@@ -5385,7 +5420,7 @@ ipcMain.handle(IPC.PICK_PANEL_READ_CSS, async (_, { i } = {}) => {
   const p = pendingPanelPick;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return [];
   try {
-    const r = await p.view.webContents.executeJavaScript(`window.__cathodePanel ? window.__cathodePanel.readCSS(${Number(i)}) : []`);
+    const r = await pageJS(p.view.webContents, `window.__cathodePanel ? window.__cathodePanel.readCSS(${Number(i)}) : []`);
     return Array.isArray(r) ? r : [];
   } catch (_) { return []; }
 });
@@ -5452,7 +5487,7 @@ function selectionOverlayScript(rects, id) {
 const SEL_SHOT_ID = '__cathode_selection_shot__';
 async function clearSelectionOverlay(view) {
   try {
-    await view.webContents.executeJavaScript(
+    await pageJS(view.webContents, 
       `(function(){var e=document.getElementById(${JSON.stringify(SEL_SHOT_ID)});if(e)e.remove();return true;})()`);
   } catch (_) {}
 }
@@ -5462,7 +5497,7 @@ async function captureSelectionShot(view, items) {
   if (!rects.length) return null;
   let box = null;
   try {
-    box = await view.webContents.executeJavaScript(
+    box = await pageJS(view.webContents, 
       `(${selectionOverlayScript})(${JSON.stringify(rects)},${JSON.stringify(SEL_SHOT_ID)})`);
   } catch (_) { await clearSelectionOverlay(view); return null; }
   if (!box || !box.w || !box.h) { await clearSelectionOverlay(view); return null; }
@@ -5511,14 +5546,14 @@ let pendingExtract = null;   // { view, items }
 ipcMain.on(IPC.EXTRACT_PANEL_HIGHLIGHT, async (_, { active } = {}) => {
   const p = pendingExtract;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return;
-  try { await p.view.webContents.executeJavaScript(`window.__cathodePanel && window.__cathodePanel.set(${JSON.stringify(active || [])})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodePanel && window.__cathodePanel.set(${JSON.stringify(active || [])})`); } catch (_) {}
 });
 // Show/hide the persisted box/lasso selection overlay (the panel's "Hide selection" link).
 ipcMain.on(IPC.TOGGLE_PAGE_SELECTION, (_, { visible } = {}) => {
   const view = getActivePickView();
   if (!view || view.webContents.isDestroyed()) return;
   // The resize box (#__cathode_rz__) follows too; the flag covers a box attached later.
-  view.webContents.executeJavaScript(`(function(){window.__cathodeSelHidden=${!visible};document.querySelectorAll('[data-cathode-selection], #__cathode_selection__, #__cathode_rz__').forEach(function(s){s.style.display=${visible ? "''" : "'none'"};});if(window.__cathodePanel&&window.__cathodePanel.redraw)window.__cathodePanel.redraw();})()`).catch(() => {});   // every pick's outline, not just the latest
+  pageJS(view.webContents, `(function(){window.__cathodeSelHidden=${!visible};document.querySelectorAll('[data-cathode-selection], #__cathode_selection__, #__cathode_rz__').forEach(function(s){s.style.display=${visible ? "''" : "'none'"};});if(window.__cathodePanel&&window.__cathodePanel.redraw)window.__cathodePanel.redraw();})()`).catch(() => {});   // every pick's outline, not just the latest
 });
 // Per-element extraction: each entry has its own keys/media chosen in its drawer,
 // extracted independently (scoped to that element), then merged into one message.
@@ -5536,7 +5571,7 @@ ipcMain.on(IPC.EXTRACT_PANEL_SEND, async (_, { perElement = [], instruction = ''
     if (!keys.length && !mediaTypes.length) continue;
     let res = null;
     try {
-      res = await view.webContents.executeJavaScript(
+      res = await pageJS(view.webContents, 
         `window.__cathodePanel && window.__cathodePanel.extract(${Number(pe.index)}, ${JSON.stringify(keys)}, ${JSON.stringify(mediaTypes)}, ${JSON.stringify(pe.mediaDest || 'chat')})`);
     } catch (e) { console.error('Extract error:', e); }
     if (!res) continue;
@@ -5588,14 +5623,14 @@ const HOVER_TRACKER = `(function(){
 })();`;
 function installHoverTracker(view) {
   if (!view || view.webContents.isDestroyed()) return;
-  view.webContents.executeJavaScript(HOVER_TRACKER).catch(() => {});
+  pageJS(view.webContents, HOVER_TRACKER).catch(() => {});
 }
 async function screenshotForceHover(view) {
   if (devToolsView || !view || view.webContents.isDestroyed()) return null;   // one CDP client only
   let count = 0;
   try {
     // Tag the last-hovered element + its ancestors (hover styles can live on either).
-    count = await view.webContents.executeJavaScript(`(function(){
+    count = await pageJS(view.webContents, `(function(){
       var el = window.__cathodeHoverEl, out = [];
       while (el && el.nodeType === 1 && el !== document.documentElement) { out.push(el); el = el.parentElement; }
       out.forEach(function(e,i){ e.setAttribute('data-cathode-hover', String(i)); });
@@ -5625,7 +5660,7 @@ async function screenshotClearHover(view, forced) {
     const dbg = view.webContents.debugger;
     if (forced) for (const nodeId of forced) { try { await dbg.sendCommand('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] }); } catch (_) {} }
   } catch (_) {}
-  try { await view.webContents.executeJavaScript(`document.querySelectorAll('[data-cathode-hover]').forEach(function(e){ e.removeAttribute('data-cathode-hover'); });`); } catch (_) {}
+  try { await pageJS(view.webContents, `document.querySelectorAll('[data-cathode-hover]').forEach(function(e){ e.removeAttribute('data-cathode-hover'); });`); } catch (_) {}
 }
 
 // ── IPC: screenshot ───────────────────────────────────────────────
@@ -5636,7 +5671,7 @@ ipcMain.on(IPC.PICK_SCREENSHOT, async () => {
   try {
     forcedHover = await screenshotForceHover(view);   // keep the hovered element's :hover through capture
     // Phase 1: user draws the capture region
-    const sel = await view.webContents.executeJavaScript(getScreenshotScript());
+    const sel = await pageJS(view.webContents, getScreenshotScript());
     if (!sel) { uiSend(IPC.PICK_CANCELLED); return; }
 
     const { x, y, width, height, mouseUpX, mouseUpY } = sel;
@@ -5690,12 +5725,12 @@ ipcMain.on(IPC.SCREENSHOT_PANEL_CANCEL, () => {
 
 // ── IPC: draw tool ────────────────────────────────────────────────
 // Set up the persistent marker layer, then open the in-app brush panel.
-ipcMain.on(IPC.PICK_DRAW, async () => {
+ipcMain.on(IPC.PICK_DRAW, async (_, { rearm = false } = {}) => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
-    await view.webContents.executeJavaScript(getDrawScript());
-    uiSend(IPC.DRAW_PANEL_OPEN);
+    await pageJS(view.webContents, getDrawScript());
+    if (!rearm) uiSend(IPC.DRAW_PANEL_OPEN);   // rearm: the panel is already open after a reload
   } catch (err) {
     console.error('Draw setup error:', err);
     uiSend(IPC.PICK_CANCELLED);
@@ -5705,7 +5740,7 @@ function markerCall(method, arg) {
   const view = getActivePickView();
   if (!view || view.webContents.isDestroyed()) return;
   const a = arg === undefined ? '' : JSON.stringify(arg);
-  view.webContents.executeJavaScript(`window.__cathodeMarker&&window.__cathodeMarker.${method}(${a})`).catch(() => {});
+  pageJS(view.webContents, `window.__cathodeMarker&&window.__cathodeMarker.${method}(${a})`).catch(() => {});
 }
 ipcMain.on(IPC.MARKER_SET_COLOR, (_, c) => markerCall('setColor', c));
 ipcMain.on(IPC.MARKER_SET_SIZE,  (_, n) => markerCall('setSize', n));
@@ -5718,7 +5753,7 @@ ipcMain.on(IPC.MARKER_SEND, async (_, { instructions = '' } = {}) => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
-    const canvasDataUrl = await view.webContents.executeJavaScript('window.__cathodeMarker&&window.__cathodeMarker.composite()');
+    const canvasDataUrl = await pageJS(view.webContents, 'window.__cathodeMarker&&window.__cathodeMarker.composite()');
     const pageImage = await capturePageClean(view.webContents);
     const pageB64   = pageImage.toPNG().toString('base64');
     markerCall('teardown');
@@ -5734,7 +5769,7 @@ ipcMain.on(IPC.DRAW_CANCEL, () => markerCall('teardown'));
 ipcMain.on(IPC.PICK_CANCEL, () => {
   const view = getActivePickView();
   if (!view || view.webContents.isDestroyed()) return;
-  view.webContents.executeJavaScript(
+  pageJS(view.webContents, 
     `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`
   ).catch(() => {});
 });
@@ -5760,7 +5795,7 @@ function stopMovePoll() { if (movePollTimer) { clearInterval(movePollTimer); mov
 async function clearMove(view) {
   const wc = (view || (pendingMove && pendingMove.view) || {}).webContents;
   if (!wc || wc.isDestroyed()) return;
-  try { await wc.executeJavaScript('window.__cathodeMove && window.__cathodeMove.clear()'); } catch (_) {}
+  try { await pageJS(wc, 'window.__cathodeMove && window.__cathodeMove.clear()'); } catch (_) {}
 }
 function endMoveSession() {
   pendingMove = null; stopMovePoll();
@@ -5773,7 +5808,7 @@ function startMovePoll() {
     const p = pendingMove;
     if (!p || !p.view || p.view.webContents.isDestroyed()) { endMoveSession(); return; }
     let st;
-    try { st = await p.view.webContents.executeJavaScript(`window.__cathodeMove ? window.__cathodeMove.state(${p.ver}) : 'gone'`); } catch (_) { return; }
+    try { st = await pageJS(p.view.webContents, `window.__cathodeMove ? window.__cathodeMove.state(${p.ver}) : 'gone'`); } catch (_) { return; }
     if (p !== pendingMove) return;
     if (st === 'gone') { endMoveSession(); return; }   // page reloaded / navigated under the tool
     if (!st) return;                                    // unchanged since last poll
@@ -5790,7 +5825,7 @@ ipcMain.on(IPC.PICK_MOVE, async (_, { snap = true } = {}) => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
-    await view.webContents.executeJavaScript(getMoveScript({ snap: snap !== false }));
+    await pageJS(view.webContents, getMoveScript({ snap: snap !== false }));
     pendingMove = { view, ver: 0 };
     uiSend(IPC.MOVE_PANEL_OPEN);
     startMovePoll();
@@ -5802,13 +5837,13 @@ ipcMain.on(IPC.PICK_MOVE, async (_, { snap = true } = {}) => {
 ipcMain.on(IPC.MOVE_PANEL_REMOVE, async (_, { id } = {}) => {
   const p = pendingMove;
   if (!p || p.view.webContents.isDestroyed()) return;
-  try { await p.view.webContents.executeJavaScript(`window.__cathodeMove && window.__cathodeMove.remove(${Number(id)})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodeMove && window.__cathodeMove.remove(${Number(id)})`); } catch (_) {}
 });
 ipcMain.on(IPC.MOVE_PANEL_HOVER, async (_, { id } = {}) => {
   const p = pendingMove;
   if (!p || p.view.webContents.isDestroyed()) return;
   const arg = id == null ? 'null' : Number(id);
-  try { await p.view.webContents.executeJavaScript(`window.__cathodeMove && window.__cathodeMove.highlight(${arg})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodeMove && window.__cathodeMove.highlight(${arg})`); } catch (_) {}
 });
 ipcMain.on(IPC.MOVE_PANEL_CANCEL, async () => {
   const p = pendingMove;
@@ -5865,13 +5900,13 @@ ipcMain.on(IPC.MOVE_PANEL_SEND, async (_, { instruction = '', notes = {}, screen
   if (!p || p.view.webContents.isDestroyed()) { uiSend(IPC.PICK_CANCELLED); return; }
   const wc = p.view.webContents;
   let moves = [];
-  try { moves = (await wc.executeJavaScript('window.__cathodeMove ? window.__cathodeMove.moves() : []')) || []; } catch (_) {}
+  try { moves = (await pageJS(wc, 'window.__cathodeMove ? window.__cathodeMove.moves() : []')) || []; } catch (_) {}
   let shot = '';
   if (screenshot && moves.length) {
     // Capture with the arrows on the page (selection/hover chrome hidden) — one image
     // makes a multi-move request far less ambiguous for the agent.
     try {
-      await wc.executeJavaScript('window.__cathodeMove && window.__cathodeMove.hideChrome()');
+      await pageJS(wc, 'window.__cathodeMove && window.__cathodeMove.hideChrome()');
       await new Promise(r => setTimeout(r, 60));
       const img = await capturePageClean(wc);
       const dir = path.join(app.getPath('userData'), 'screenshots');
@@ -5906,7 +5941,7 @@ ipcMain.on(IPC.MOVE_PANEL_SEND, async (_, { instruction = '', notes = {}, screen
 let slSession = null;   // { view, id, panel, values, layout, theme, demo, onLoad, onNav, poll, shown, suspended }
 function slExec(view, code) {
   if (!view || view.webContents.isDestroyed()) return Promise.resolve(null);
-  return view.webContents.executeJavaScript(code, true).catch(() => null);
+  return pageJS(view.webContents, code, true).catch(() => null);
 }
 async function slPrime(s) {
   await slExec(s.view, getSlidersRuntime());
@@ -5961,7 +5996,7 @@ async function slRetarget() {
 }
 // Keep the pinned panel out of screenshots, previews and drawings of the page.
 async function capturePageClean(wc, rect) {
-  const vis = (v) => wc.executeJavaScript(`(function(){var h=document.getElementById('gamut-sliders-overlay');if(!h)return 0;h.style.visibility='${v}';return new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1)})})});})()`, true).catch(() => 0);
+  const vis = (v) => pageJS(wc, `(function(){var h=document.getElementById('gamut-sliders-overlay');if(!h)return 0;h.style.visibility='${v}';return new Promise(function(r){requestAnimationFrame(function(){requestAnimationFrame(function(){r(1)})})});})()`, true).catch(() => 0);
   const had = slSession ? await vis('hidden') : 0;
   try { return rect ? await wc.capturePage(rect) : await wc.capturePage(); }
   finally { if (had) vis(''); }
@@ -6121,14 +6156,14 @@ let pendingAnim = null;
 async function clearAnim(view) {
   const wc = (view || (pendingAnim && pendingAnim.view) || {}).webContents;
   if (!wc || wc.isDestroyed()) return;
-  try { await wc.executeJavaScript('window.__cathodeAnim && window.__cathodeAnim.clear()'); } catch (_) {}
+  try { await pageJS(wc, 'window.__cathodeAnim && window.__cathodeAnim.clear()'); } catch (_) {}
 }
 ipcMain.on(IPC.PICK_ANIMATE, async (_, opts) => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   const append = !!(opts && opts.append) && !!pendingAnim && pendingAnim.view === view;
   try {
-    const sel = await view.webContents.executeJavaScript(getAnimationScript(append));
+    const sel = await pageJS(view.webContents, getAnimationScript(append));
     // Cancelled before selecting (fresh pick), or an appended pick that named an
     // element already in the set — either way leave any existing session untouched.
     if (!sel || !sel.items || !sel.items.length) { uiSend(IPC.PICK_CANCELLED); return; }
@@ -6144,7 +6179,7 @@ ipcMain.on(IPC.PICK_ANIMATE, async (_, opts) => {
 ipcMain.on(IPC.ANIM_PANEL_PREVIEW, async (_, { spec = {} } = {}) => {
   const p = pendingAnim;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return;
-  try { await p.view.webContents.executeJavaScript(`window.__cathodeAnim && window.__cathodeAnim.preview(${JSON.stringify(spec)})`); } catch (_) {}
+  try { await pageJS(p.view.webContents, `window.__cathodeAnim && window.__cathodeAnim.preview(${JSON.stringify(spec)})`); } catch (_) {}
 });
 
 // ── States rows (inside each element's drawer in the Box/Lasso panel): force
@@ -6200,7 +6235,7 @@ ipcMain.on(IPC.ANIM_PANEL_SEND, async (_, { spec = {}, instruction = '', framewo
   pendingAnim = null;
   if (!p) { uiSend(IPC.PICK_CANCELLED); return; }
   let res = null;
-  try { res = await p.view.webContents.executeJavaScript('window.__cathodeAnim && window.__cathodeAnim.result()'); } catch (_) {}
+  try { res = await pageJS(p.view.webContents, 'window.__cathodeAnim && window.__cathodeAnim.result()'); } catch (_) {}
   await clearAnim(p.view);   // revert the preview — the animation is a request, not a permanent page change
   uiSend(IPC.PICK_CANCELLED);
   if (!res || !res.length) return;
@@ -6236,7 +6271,7 @@ let pendingEyedropper = null;   // { view }
 function edExec(js) {
   const p = pendingEyedropper;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return Promise.resolve(null);
-  return p.view.webContents.executeJavaScript(js).catch(() => null);
+  return pageJS(p.view.webContents, js).catch(() => null);
 }
 
 ipcMain.on(IPC.PICK_EYEDROPPER, async () => {
@@ -6245,7 +6280,7 @@ ipcMain.on(IPC.PICK_EYEDROPPER, async () => {
   try {
     // Snapshot the rendered viewport so the loupe can sample exact pixels.
     const image = await capturePageClean(view.webContents);
-    const sel = await view.webContents.executeJavaScript(getEyedropperScript(image.toDataURL()));
+    const sel = await pageJS(view.webContents, getEyedropperScript(image.toDataURL()));
     if (!sel) { uiSend(IPC.PICK_CANCELLED); return; }   // cancelled during hover
     pendingEyedropper = { view };
     uiSend(IPC.EYEDROPPER_PANEL_OPEN, { tool: 'Eyedropper', ...sel });
@@ -6294,13 +6329,13 @@ let pendingA11y = null;   // { view }
 function a11yExec(js) {
   const p = pendingA11y;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return Promise.resolve(null);
-  return p.view.webContents.executeJavaScript(js).catch(() => null);
+  return pageJS(p.view.webContents, js).catch(() => null);
 }
 ipcMain.on(IPC.PICK_A11Y, async () => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
-    const result = await view.webContents.executeJavaScript(getA11yScript());
+    const result = await pageJS(view.webContents, getA11yScript());
     uiSend(IPC.PICK_CANCELLED);
     if (!result) return;
     pendingA11y = { view };
@@ -6351,7 +6386,7 @@ let pendingDrift = null;
 function driftExec(js) {
   const p = pendingDrift;
   if (!p || !p.view || p.view.webContents.isDestroyed()) return Promise.resolve(null);
-  return p.view.webContents.executeJavaScript(js).catch(() => null);
+  return pageJS(p.view.webContents, js).catch(() => null);
 }
 // Pull the connected Storybook's design tokens (its preview `:root` custom
 // properties) so drift matches against the canonical design system, not just the
@@ -6376,7 +6411,7 @@ async function extractStorybookTokens() {
     } catch (e) { return null; }
   })()`;
   try {
-    const out = await storybookView.webContents.executeJavaScript(js);
+    const out = await pageJS(storybookView.webContents, js);
     return (out && typeof out === 'object' && Object.keys(out).length) ? out : null;
   } catch (_) { return null; }
 }
@@ -6385,7 +6420,7 @@ ipcMain.on(IPC.PICK_DRIFT, async () => {
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
     const sbTokens = await extractStorybookTokens();   // design-system tokens from the connected Storybook (if any)
-    const result = await view.webContents.executeJavaScript(getDriftScript(sbTokens));
+    const result = await pageJS(view.webContents, getDriftScript(sbTokens));
     uiSend(IPC.PICK_CANCELLED);
     if (!result) return;
     pendingDrift = { view, sbTokens: result.sbTokens || 0 };
@@ -6430,7 +6465,7 @@ ipcMain.on(IPC.DRIFT_CANCEL, async () => {
 function clearCpHighlight() {
   const view = getActivePickView();
   if (!view || view.webContents.isDestroyed()) return;
-  view.webContents.executeJavaScript("(function(){['__cathode_cp_hl__','__cathode_cp_marker__'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});})()").catch(() => {});
+  pageJS(view.webContents, "(function(){['__cathode_cp_hl__','__cathode_cp_marker__'].forEach(function(id){var e=document.getElementById(id);if(e)e.remove();});})()").catch(() => {});
 }
 ipcMain.on(IPC.CP_HIGHLIGHT_TARGET, (_, { selector } = {}) => {
   const view = getActivePickView();
@@ -6445,7 +6480,7 @@ ipcMain.on(IPC.CP_HIGHLIGHT_TARGET, (_, { selector } = {}) => {
       document.body.appendChild(hl); }
     hl.style.left=r.left+'px';hl.style.top=r.top+'px';hl.style.width=r.width+'px';hl.style.height=r.height+'px';hl.style.display='block';
   })();`;
-  view.webContents.executeJavaScript(js).catch(() => {});
+  pageJS(view.webContents, js).catch(() => {});
 });
 ipcMain.on(IPC.CP_CLEAR_TARGET_HIGHLIGHT, () => clearCpHighlight());
 
@@ -6454,7 +6489,7 @@ ipcMain.on(IPC.PICK_COMPONENT, async () => {
   const view = getActivePickView();
   if (!view) { uiSend(IPC.PICK_CANCELLED); return; }
   try {
-    const result = await view.webContents.executeJavaScript(`
+    const result = await pageJS(view.webContents, `
       (function() {
         var oldMk = document.getElementById('__cathode_cp_marker__'); if (oldMk) oldMk.remove();
         const overlay = document.createElement('div');
